@@ -10,10 +10,10 @@ use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
+mod config;
 mod models;
 mod service;
 mod stats;
-mod config;
 
 use config::Config;
 use service::LoroService;
@@ -30,7 +30,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration
     let config = Config::from_env()?;
-    info!("Starting Loro AI Voice Assistant on {}:{}", config.host, config.port);
+    info!(
+        "Starting Loro AI Voice Assistant on {}:{}",
+        config.host, config.port
+    );
 
     // Initialize service
     let loro_service = Arc::new(LoroService::new(config.clone()).await?);
@@ -49,9 +52,9 @@ async fn main() -> anyhow::Result<()> {
     // Start server
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
     info!("🚀 Loro server listening on {}", listener.local_addr()?);
-    
+
     axum::serve(listener, app).await?;
-    
+
     Ok(())
 }
 
@@ -72,25 +75,70 @@ async fn health() -> Json<serde_json::Value> {
 async fn chat_completions(
     State(service): State<Arc<LoroService>>,
     Json(request): Json<models::ChatCompletionRequest>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    // Validate request
+    if let Err(validation_error) = request.validate() {
+        warn!("Request validation failed: {}", validation_error);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "message": validation_error,
+                    "type": "invalid_request_error",
+                    "code": "validation_failed"
+                }
+            })),
+        ));
+    }
+
     match service.chat_completion(request).await {
         Ok(response) => Ok(response),
         Err(e) => {
             warn!("Chat completion error: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_response = if e.to_string().contains("timeout") {
+                (
+                    StatusCode::REQUEST_TIMEOUT,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": "Request timeout",
+                            "type": "timeout_error",
+                            "code": "request_timeout"
+                        }
+                    })),
+                )
+            } else if e.to_string().contains("API error") {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": "Upstream API error",
+                            "type": "api_error",
+                            "code": "upstream_error"
+                        }
+                    })),
+                )
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": "Internal server error",
+                            "type": "internal_error",
+                            "code": "internal_error"
+                        }
+                    })),
+                )
+            };
+            Err(error_response)
         }
     }
 }
 
-async fn get_metrics(
-    State(service): State<Arc<LoroService>>,
-) -> Json<serde_json::Value> {
+async fn get_metrics(State(service): State<Arc<LoroService>>) -> Json<serde_json::Value> {
     Json(service.get_metrics().await)
 }
 
-async fn reset_metrics(
-    State(service): State<Arc<LoroService>>,
-) -> Json<serde_json::Value> {
+async fn reset_metrics(State(service): State<Arc<LoroService>>) -> Json<serde_json::Value> {
     service.reset_metrics().await;
     Json(serde_json::json!({
         "message": "Metrics reset successfully"

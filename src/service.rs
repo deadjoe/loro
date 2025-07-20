@@ -2,10 +2,10 @@ use crate::{config::Config, models::*, stats::StatsCollector};
 use anyhow::{Context, Result};
 use axum::response::{IntoResponse, Response, Sse};
 use futures::stream::{self, Stream, StreamExt};
-use std::pin::Pin;
 use rand::seq::SliceRandom;
 use reqwest::Client;
 use serde_json::json;
+use std::pin::Pin;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -29,21 +29,27 @@ impl LoroService {
             .build()
             .context("Failed to create HTTP client")?;
 
-        info!("Loro service initialized with small model: {}", config.small_model.model_name);
+        info!(
+            "Loro service initialized with small model: {}",
+            config.small_model.model_name
+        );
         info!("Large model: {}", config.large_model.model_name);
 
         Ok(Self {
-            config,
+            config: config.clone(),
             client,
-            quick_stats: Arc::new(StatsCollector::new()),
-            direct_stats: Arc::new(StatsCollector::new()),
+            quick_stats: Arc::new(StatsCollector::new(config.stats_max_entries)),
+            direct_stats: Arc::new(StatsCollector::new(config.stats_max_entries)),
         })
     }
 
     pub async fn chat_completion(&self, request: ChatCompletionRequest) -> Result<Response> {
         let disable_quick = request.disable_quick_response;
-        
-        debug!("Processing chat completion request, disable_quick: {}", disable_quick);
+
+        debug!(
+            "Processing chat completion request, disable_quick: {}",
+            disable_quick
+        );
 
         let stream: Pin<Box<dyn Stream<Item = Result<String>> + Send>> = if disable_quick {
             Box::pin(self.stream_direct_response(request).await?)
@@ -51,18 +57,11 @@ impl LoroService {
             Box::pin(self.stream_quick_response(request).await?)
         };
 
-        let sse_stream = stream.map(|chunk| {
-            match chunk {
-                Ok(data) => Ok::<_, anyhow::Error>(
-                    axum::response::sse::Event::default()
-                        .data(data)
-                ),
-                Err(e) => {
-                    error!("Stream error: {}", e);
-                    Ok(axum::response::sse::Event::default()
-                        .data(format!("data: [ERROR: {}]\n\n", e))
-                    )
-                }
+        let sse_stream = stream.map(|chunk| match chunk {
+            Ok(data) => Ok::<_, anyhow::Error>(axum::response::sse::Event::default().data(data)),
+            Err(e) => {
+                error!("Stream error: {}", e);
+                Ok(axum::response::sse::Event::default().data(format!("data: [ERROR: {e}]\n\n")))
             }
         });
 
@@ -75,17 +74,20 @@ impl LoroService {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let request_start = Instant::now();
         let request_id = Uuid::new_v4().to_string();
-        
+
         // Step 1: Get quick response
         let quick_start = Instant::now();
         let quick_response = self.get_quick_response(&request.messages).await?;
         let quick_time = quick_start.elapsed().as_secs_f64();
 
-        debug!("Quick response generated in {:.3}s: '{}'", quick_time, quick_response);
+        debug!(
+            "Quick response generated in {:.3}s: '{}'",
+            quick_time, quick_response
+        );
 
         // Create first chunk with quick response
         let first_chunk = ChatCompletionChunk {
-            id: format!("chatcmpl-{}", request_id),
+            id: format!("chatcmpl-{request_id}"),
             object: "chat.completion.chunk".to_string(),
             created: chrono::Utc::now().timestamp(),
             model: request.model.clone(),
@@ -103,7 +105,9 @@ impl LoroService {
 
         // Step 2: Start large model request in parallel
         let large_start = Instant::now();
-        let large_stream = self.get_large_model_stream(request, Some(quick_response.clone())).await?;
+        let large_stream = self
+            .get_large_model_stream(request, Some(quick_response.clone()))
+            .await?;
 
         let stats = Arc::clone(&self.quick_stats);
         let enhanced_stream = large_stream.enumerate().map(move |(i, chunk_result)| {
@@ -113,7 +117,7 @@ impl LoroService {
                         // First chunk from large model
                         let large_time = large_start.elapsed().as_secs_f64();
                         let total_time = request_start.elapsed().as_secs_f64();
-                        
+
                         stats.add_request(
                             quick_time,
                             total_time,
@@ -150,7 +154,7 @@ impl LoroService {
                         // First chunk
                         let first_response_time = request_start.elapsed().as_secs_f64();
                         let total_time = first_response_time; // Same for direct mode
-                        
+
                         stats.add_request(
                             first_response_time,
                             total_time,
@@ -164,17 +168,22 @@ impl LoroService {
             }
         });
 
-        let final_stream = enhanced_stream
-            .chain(stream::once(async { Ok("data: [DONE]\n\n".to_string()) }));
+        let final_stream =
+            enhanced_stream.chain(stream::once(async { Ok("data: [DONE]\n\n".to_string()) }));
 
         Ok(Box::pin(final_stream))
     }
 
     async fn get_quick_response(&self, messages: &[Message]) -> Result<String> {
+        // Validate input - prevent panic
+        if messages.is_empty() {
+            return Err(anyhow::anyhow!("Messages array cannot be empty"));
+        }
+
         // Try small model first
         match self.call_small_model(messages).await {
             Ok(response) => {
-                if response.len() <= 6 && self.is_appropriate_quick_response(&response) {
+                if response.chars().count() <= 6 && self.is_appropriate_quick_response(&response) {
                     return Ok(response);
                 }
             }
@@ -184,7 +193,7 @@ impl LoroService {
         }
 
         // Fallback to predefined responses
-        let last_message = messages.last().unwrap();
+        let last_message = messages.last().unwrap(); // Safe because we checked above
         let category = last_message.categorize();
         let responses = category.get_responses();
         let mut rng = rand::thread_rng();
@@ -193,6 +202,15 @@ impl LoroService {
     }
 
     async fn call_small_model(&self, messages: &[Message]) -> Result<String> {
+        if messages.is_empty() {
+            return Err(anyhow::anyhow!("Messages array cannot be empty"));
+        }
+
+        let last_message = messages.last().unwrap(); // Safe due to check above
+        if last_message.content.trim().is_empty() {
+            return Err(anyhow::anyhow!("Message content cannot be empty"));
+        }
+
         let prompt_messages = vec![
             HashMap::from([
                 ("role".to_string(), "system".to_string()),
@@ -200,7 +218,7 @@ impl LoroService {
             ]),
             HashMap::from([
                 ("role".to_string(), "user".to_string()),
-                ("content".to_string(), messages.last().unwrap().content.clone()),
+                ("content".to_string(), last_message.content.clone()),
             ]),
         ];
 
@@ -215,10 +233,16 @@ impl LoroService {
         };
 
         let response = timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(self.config.small_model_timeout_secs),
             self.client
-                .post(&format!("{}/chat/completions", self.config.small_model.base_url))
-                .header("Authorization", format!("Bearer {}", self.config.small_model.api_key))
+                .post(format!(
+                    "{}/chat/completions",
+                    self.config.small_model.base_url
+                ))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.config.small_model.api_key),
+                )
                 .header("Content-Type", "application/json")
                 .json(&request_body)
                 .send(),
@@ -230,7 +254,11 @@ impl LoroService {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Small model API error {}: {}", status, error_text));
+            return Err(anyhow::anyhow!(
+                "Small model API error {}: {}",
+                status,
+                error_text
+            ));
         }
 
         let openai_response: OpenAIResponse = response
@@ -296,8 +324,14 @@ impl LoroService {
 
         let response = self
             .client
-            .post(&format!("{}/chat/completions", self.config.large_model.base_url))
-            .header("Authorization", format!("Bearer {}", self.config.large_model.api_key))
+            .post(format!(
+                "{}/chat/completions",
+                self.config.large_model.base_url
+            ))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.large_model.api_key),
+            )
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
@@ -307,7 +341,11 @@ impl LoroService {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Large model API error {}: {}", status, error_text));
+            return Err(anyhow::anyhow!(
+                "Large model API error {}: {}",
+                status,
+                error_text
+            ));
         }
 
         let byte_stream = response.bytes_stream();
@@ -315,14 +353,12 @@ impl LoroService {
         let model_name = request.model.clone();
 
         let stream = byte_stream
-            .map(move |chunk_result| {
-                match chunk_result {
-                    Ok(bytes) => {
-                        let data = String::from_utf8_lossy(&bytes);
-                        Self::process_sse_chunk_static(&data, &request_id, &model_name)
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Stream error: {}", e)),
+            .map(move |chunk_result| match chunk_result {
+                Ok(bytes) => {
+                    let data = String::from_utf8_lossy(&bytes);
+                    Self::process_sse_chunk_static(&data, &request_id, &model_name)
                 }
+                Err(e) => Err(anyhow::anyhow!("Stream error: {}", e)),
             })
             .filter_map(|result| async move {
                 match result {
@@ -341,8 +377,7 @@ impl LoroService {
         model_name: &str,
     ) -> Result<Option<String>> {
         for line in data.lines() {
-            if line.starts_with("data: ") {
-                let json_data = &line[6..];
+            if let Some(json_data) = line.strip_prefix("data: ") {
                 if json_data == "[DONE]" {
                     return Ok(None);
                 }
@@ -352,7 +387,7 @@ impl LoroService {
                         if let Some(delta) = &choice.delta {
                             if let Some(content) = &delta.content {
                                 let chunk = ChatCompletionChunk {
-                                    id: format!("chatcmpl-{}", request_id),
+                                    id: format!("chatcmpl-{request_id}"),
                                     object: "chat.completion.chunk".to_string(),
                                     created: chrono::Utc::now().timestamp(),
                                     model: model_name.to_string(),
@@ -366,7 +401,8 @@ impl LoroService {
                                     }],
                                 };
 
-                                let chunk_data = format!("data: {}\n\n", serde_json::to_string(&chunk)?);
+                                let chunk_data =
+                                    format!("data: {}\n\n", serde_json::to_string(&chunk)?);
                                 return Ok(Some(chunk_data));
                             }
                         }
@@ -380,7 +416,7 @@ impl LoroService {
     pub async fn get_metrics(&self) -> serde_json::Value {
         let quick_stats = self.quick_stats.get_stats();
         let direct_stats = self.direct_stats.get_stats();
-        
+
         let quick_avg = self.quick_stats.get_avg_first_response_time();
         let direct_avg = self.direct_stats.get_avg_first_response_time();
         let improvement = if direct_avg > 0.0 && quick_avg > 0.0 {
