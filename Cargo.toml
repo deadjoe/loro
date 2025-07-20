@@ -3,7 +3,7 @@ name = "loro"
 version = "0.1.0"
 edition = "2021"
 description = "High-performance AI voice assistant with dual-model streaming response"
-license = "MIT"
+license = "AGPL-3.0"
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
