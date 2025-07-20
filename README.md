@@ -1,11 +1,11 @@
 # Loro - High-Performance AI Voice Assistant
 
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Tests](https://img.shields.io/badge/tests-30%20passing-green.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-80%2B%25-green.svg)]()
 
-Loro is a high-performance AI voice assistant API service built in Rust, implementing a dual-model strategy to optimize response latency. The system uses a small model to generate immediate acknowledgment responses (1-3 characters like "好的," or "让我想想,") while a large model processes the complete response in parallel, significantly improving user experience in voice interactions.
+Loro is a high-performance AI voice assistant API service built in Rust, implementing a dual-model strategy to optimize response latency. The system uses a small model to generate immediate acknowledgment responses while a large model processes the complete response in parallel, significantly improving user experience in voice interactions.
 
 ## ✨ Key Features
 
@@ -276,10 +276,9 @@ loro/
 │   └── end_to_end_test.rs   # End-to-end system tests
 ├── examples/
 │   └── client.rs        # Example client with benchmarking
-├── references/          # Original Python implementation
-│   ├── main.py         # Reference server implementation
-│   └── client.py       # Reference client implementation
-└── CLAUDE.md           # Development documentation and targets
+└── references/          # Original Python implementation (local only)
+    ├── main.py         # Reference server implementation
+    └── client.py       # Reference client implementation
 ```
 
 ### Development Workflow
@@ -362,7 +361,7 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the AGPL-3.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
@@ -372,5 +371,4 @@ This project is a Rust reimplementation of the original Python BlastOff LLM voic
 
 For questions, issues, or contributions:
 - Open an issue on GitHub
-- Check existing documentation in `CLAUDE.md`
 - Review the test suite for usage examples

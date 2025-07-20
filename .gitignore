@@ -1,3 +1,7 @@
+# Internal documentation (DO NOT PUSH TO PUBLIC REPO)
+CLAUDE.md
+references/
+
 # Rust
 /target/
 Cargo.lock
