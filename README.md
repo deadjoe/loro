@@ -16,18 +16,6 @@ Loro is a high-performance AI voice assistant API service built in Rust, impleme
 - **OpenAI Compatibility**: Fully compatible with OpenAI ChatCompletion API
 - **Production Ready**: Comprehensive error handling, structured logging, and 80%+ test coverage
 
-## 🚀 Performance Benefits
-
-Expected improvements over the original Python implementation:
-
-| Metric | Improvement |
-|--------|-------------|
-| Response Latency | 30-50% reduction |
-| Concurrent Capacity | 3-5x increase |
-| Memory Usage | 50-70% reduction |
-| Startup Time | 10x faster |
-
-*Note: These are target performance metrics based on architectural improvements. Actual performance may vary depending on deployment environment and model configurations.*
 
 ## 📋 Quick Start
 
@@ -195,12 +183,6 @@ cargo test --test end_to_end_test   # End-to-end tests
 cargo test -- --nocapture
 ```
 
-### Test Coverage
-
-The project maintains 80%+ test coverage with 30 comprehensive tests:
-- **Unit Tests**: 12 tests covering core modules
-- **Integration Tests**: 19 tests covering service integration
-- **End-to-End Tests**: 9 tests covering complete system functionality
 
 ### Performance Benchmarking
 
