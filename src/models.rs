@@ -24,6 +24,42 @@ pub struct ChatCompletionRequest {
     pub disable_quick_response: bool,
 }
 
+impl ChatCompletionRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.model.trim().is_empty() {
+            return Err("Model name cannot be empty".to_string());
+        }
+
+        if self.messages.is_empty() {
+            return Err("Messages array cannot be empty".to_string());
+        }
+
+        for (i, message) in self.messages.iter().enumerate() {
+            if message.role.trim().is_empty() {
+                return Err(format!("Message {i} role cannot be empty"));
+            }
+            if message.content.trim().is_empty() {
+                return Err(format!("Message {i} content cannot be empty"));
+            }
+            if !["system", "user", "assistant"].contains(&message.role.as_str()) {
+                return Err(format!("Message {i} has invalid role: {}", message.role));
+            }
+        }
+
+        if let Some(max_tokens) = self.max_tokens {
+            if max_tokens == 0 || max_tokens > 8192 {
+                return Err("max_tokens must be between 1 and 8192".to_string());
+            }
+        }
+
+        if self.temperature < 0.0 || self.temperature > 2.0 {
+            return Err("Temperature must be between 0.0 and 2.0".to_string());
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Stop {
@@ -149,23 +185,38 @@ impl RequestCategory {
 impl Message {
     pub fn categorize(&self) -> RequestCategory {
         let content = self.content.to_lowercase();
-        
+
         // Greeting patterns
-        if content.contains("你好") || content.contains("hello") || content.contains("hi") || content.contains("嗨") {
+        if content.contains("你好")
+            || content.contains("hello")
+            || content.contains("hi")
+            || content.contains("嗨")
+        {
             RequestCategory::Greeting
         }
         // Question patterns
-        else if content.contains("什么") || content.contains("如何") || content.contains("怎么") 
-            || content.contains("为什么") || content.contains("why") || content.contains("how") 
-            || content.contains("what") || content.contains("?") || content.contains("？") {
+        else if content.contains("什么")
+            || content.contains("如何")
+            || content.contains("怎么")
+            || content.contains("为什么")
+            || content.contains("why")
+            || content.contains("how")
+            || content.contains("what")
+            || content.contains("?")
+            || content.contains("？")
+        {
             RequestCategory::Question
         }
         // Request patterns
-        else if content.contains("请") || content.contains("帮我") || content.contains("能不能") 
-            || content.contains("可以") || content.contains("help") || content.contains("please") {
+        else if content.contains("请")
+            || content.contains("帮我")
+            || content.contains("能不能")
+            || content.contains("可以")
+            || content.contains("help")
+            || content.contains("please")
+        {
             RequestCategory::Request
-        }
-        else {
+        } else {
             RequestCategory::Thinking
         }
     }

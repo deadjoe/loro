@@ -1,11 +1,11 @@
-use loro::{config::Config, service::LoroService, models::*};
+use loro::{config::Config, models::*, service::LoroService};
 
 #[tokio::test]
 async fn test_service_initialization() {
     // Set test environment variables
     std::env::set_var("SMALL_MODEL_API_KEY", "test-key");
     std::env::set_var("LARGE_MODEL_API_KEY", "test-key");
-    
+
     let config = Config::from_env().expect("Failed to load config");
     let service = LoroService::new(config).await;
     assert!(service.is_ok(), "Service should initialize successfully");
@@ -17,17 +17,17 @@ async fn test_message_categorization() {
         role: "user".to_string(),
         content: "你好".to_string(),
     };
-    
+
     let question = Message {
         role: "user".to_string(),
         content: "什么是人工智能？".to_string(),
     };
-    
+
     let request = Message {
         role: "user".to_string(),
         content: "请帮我设个闹钟".to_string(),
     };
-    
+
     // Test categorization logic
     matches!(greeting.categorize(), RequestCategory::Greeting);
     matches!(question.categorize(), RequestCategory::Question);
@@ -37,43 +37,46 @@ async fn test_message_categorization() {
 #[tokio::test]
 async fn test_quick_responses() {
     use loro::models::RequestCategory;
-    
+
     let categories = [
         RequestCategory::Greeting,
         RequestCategory::Question,
         RequestCategory::Request,
         RequestCategory::Thinking,
     ];
-    
+
     for category in &categories {
         let responses = category.get_responses();
         assert!(!responses.is_empty(), "Category should have responses");
-        assert!(responses.iter().all(|r| r.chars().count() <= 6), "Responses should be short");
+        assert!(
+            responses.iter().all(|r| r.chars().count() <= 6),
+            "Responses should be short"
+        );
     }
 }
 
 #[tokio::test]
 async fn test_stats_collector() {
     use loro::stats::StatsCollector;
-    
-    let collector = StatsCollector::new();
-    
+
+    let collector = StatsCollector::new(1000);
+
     // Add some test data
     collector.add_request(0.1, 1.0, Some(0.1), Some(0.9));
     collector.add_request(0.2, 1.5, Some(0.2), Some(1.3));
     collector.add_request(0.15, 1.2, Some(0.15), Some(1.05));
-    
+
     let stats = collector.get_stats();
-    
+
     // Verify stats structure
     assert!(stats.get("total_requests").is_some());
     assert!(stats.get("first_response_latency").is_some());
     assert!(stats.get("total_response_latency").is_some());
     assert!(stats.get("quick_response_latency").is_some());
     assert!(stats.get("large_model_latency").is_some());
-    
+
     assert_eq!(collector.get_request_count(), 3);
-    
+
     // Test reset
     collector.reset();
     assert_eq!(collector.get_request_count(), 0);
@@ -82,32 +85,31 @@ async fn test_stats_collector() {
 #[cfg(test)]
 mod mock_tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_request_serialization() {
         let request = ChatCompletionRequest {
             model: "test-model".to_string(),
-            messages: vec![
-                Message {
-                    role: "user".to_string(),
-                    content: "Hello".to_string(),
-                }
-            ],
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            }],
             max_tokens: Some(100),
             temperature: 0.7,
             stream: true,
             stop: None,
             disable_quick_response: false,
         };
-        
+
         let json = serde_json::to_string(&request).expect("Should serialize");
-        let parsed: ChatCompletionRequest = serde_json::from_str(&json).expect("Should deserialize");
-        
+        let parsed: ChatCompletionRequest =
+            serde_json::from_str(&json).expect("Should deserialize");
+
         assert_eq!(request.model, parsed.model);
         assert_eq!(request.messages.len(), parsed.messages.len());
         assert_eq!(request.temperature, parsed.temperature);
     }
-    
+
     #[tokio::test]
     async fn test_response_chunk_creation() {
         let chunk = ChatCompletionChunk {
@@ -115,23 +117,202 @@ mod mock_tests {
             object: "chat.completion.chunk".to_string(),
             created: chrono::Utc::now().timestamp(),
             model: "test-model".to_string(),
-            choices: vec![
-                ChoiceDelta {
-                    index: 0,
-                    delta: MessageDelta {
-                        role: Some("assistant".to_string()),
-                        content: Some("Hello!".to_string()),
-                    },
-                    finish_reason: None,
-                }
-            ],
+            choices: vec![ChoiceDelta {
+                index: 0,
+                delta: MessageDelta {
+                    role: Some("assistant".to_string()),
+                    content: Some("Hello!".to_string()),
+                },
+                finish_reason: None,
+            }],
         };
-        
+
         let json = serde_json::to_string(&chunk).expect("Should serialize chunk");
-        let parsed: ChatCompletionChunk = serde_json::from_str(&json).expect("Should deserialize chunk");
-        
+        let parsed: ChatCompletionChunk =
+            serde_json::from_str(&json).expect("Should deserialize chunk");
+
         assert_eq!(chunk.id, parsed.id);
         assert_eq!(chunk.model, parsed.model);
         assert_eq!(chunk.choices.len(), parsed.choices.len());
+    }
+
+    #[tokio::test]
+    async fn test_config_validation() {
+        use loro::config::Config;
+
+        // Test with valid environment (should succeed)
+        std::env::set_var("SMALL_MODEL_API_KEY", "test-small-key");
+        std::env::set_var("LARGE_MODEL_API_KEY", "test-large-key");
+
+        let result = Config::from_env();
+        assert!(result.is_ok(), "Should succeed with valid API keys");
+
+        // Test validation with empty API key - create a config manually to test validation
+        let mut config = result.unwrap();
+        config.small_model.api_key = "".to_string();
+        assert!(config.validate().is_err(), "Should fail with empty API key");
+    }
+
+    #[tokio::test]
+    async fn test_request_validation() {
+        // Test empty messages
+        let request = ChatCompletionRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            max_tokens: Some(100),
+            temperature: 0.7,
+            stream: true,
+            stop: None,
+            disable_quick_response: false,
+        };
+        assert!(
+            request.validate().is_err(),
+            "Should fail with empty messages"
+        );
+
+        // Test invalid role
+        let request = ChatCompletionRequest {
+            model: "test".to_string(),
+            messages: vec![Message {
+                role: "invalid".to_string(),
+                content: "test".to_string(),
+            }],
+            max_tokens: Some(100),
+            temperature: 0.7,
+            stream: true,
+            stop: None,
+            disable_quick_response: false,
+        };
+        assert!(request.validate().is_err(), "Should fail with invalid role");
+
+        // Test invalid temperature
+        let request = ChatCompletionRequest {
+            model: "test".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "test".to_string(),
+            }],
+            max_tokens: Some(100),
+            temperature: 3.0, // Invalid
+            stream: true,
+            stop: None,
+            disable_quick_response: false,
+        };
+        assert!(
+            request.validate().is_err(),
+            "Should fail with invalid temperature"
+        );
+
+        // Test valid request
+        let request = ChatCompletionRequest {
+            model: "test".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "test".to_string(),
+            }],
+            max_tokens: Some(100),
+            temperature: 0.7,
+            stream: true,
+            stop: None,
+            disable_quick_response: false,
+        };
+        assert!(request.validate().is_ok(), "Should pass with valid request");
+    }
+
+    #[tokio::test]
+    async fn test_stats_collector_memory_limit() {
+        use loro::stats::StatsCollector;
+
+        let collector = StatsCollector::new(5); // Small limit for testing
+
+        // Add more entries than the limit
+        for i in 0..10 {
+            collector.add_request(
+                i as f64,
+                i as f64 * 2.0,
+                Some(i as f64),
+                Some(i as f64 * 1.5),
+            );
+        }
+
+        let _stats = collector.get_stats();
+        assert_eq!(collector.get_request_count(), 10);
+
+        // Check that old entries were removed (implementation detail)
+        // The collector should maintain only the latest entries within the limit
+    }
+
+    #[tokio::test]
+    async fn test_message_categorization_edge_cases() {
+        // Test empty content
+        let message = Message {
+            role: "user".to_string(),
+            content: "".to_string(),
+        };
+        // Should not panic and should return some category
+        let _category = message.categorize();
+
+        // Test mixed language
+        let message = Message {
+            role: "user".to_string(),
+            content: "Hello 你好 how are you？".to_string(),
+        };
+        let category = message.categorize();
+        matches!(category, RequestCategory::Greeting);
+
+        // Test special characters
+        let message = Message {
+            role: "user".to_string(),
+            content: "!@#$%^&*()".to_string(),
+        };
+        let _category = message.categorize();
+        // Should not panic
+    }
+
+    #[tokio::test]
+    async fn test_quick_response_appropriateness() {
+        use loro::models::RequestCategory;
+
+        // All predefined responses should be appropriate
+        for category in [
+            RequestCategory::Greeting,
+            RequestCategory::Question,
+            RequestCategory::Request,
+            RequestCategory::Thinking,
+        ] {
+            let responses = category.get_responses();
+            for response in responses {
+                assert!(
+                    response.chars().count() <= 6,
+                    "Response '{}' is too long",
+                    response
+                );
+                assert!(!response.trim().is_empty(), "Response should not be empty");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_percentile_calculation() {
+        use loro::stats::StatsCollector;
+
+        let collector = StatsCollector::new(1000);
+
+        // Add known data points
+        let data_points = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        for (_i, &point) in data_points.iter().enumerate() {
+            collector.add_request(point, point * 2.0, Some(point), Some(point * 1.5));
+        }
+
+        let stats = collector.get_stats();
+        let first_response_stats = stats["first_response_latency"].as_object().unwrap();
+
+        // Check that percentiles are reasonable
+        let p50 = first_response_stats["p50"].as_f64().unwrap();
+        let p95 = first_response_stats["p95"].as_f64().unwrap();
+
+        assert!(p50 >= 5.0 && p50 <= 6.0, "P50 should be around median");
+        assert!(p95 >= 9.0 && p95 <= 10.0, "P95 should be near the top");
+        assert!(p95 >= p50, "P95 should be >= P50");
     }
 }

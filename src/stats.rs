@@ -10,18 +10,26 @@ pub struct LatencyStats {
     pub p95: f64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StatsCollector {
     first_response_times: RwLock<Vec<f64>>,
     total_response_times: RwLock<Vec<f64>>,
     quick_response_times: RwLock<Vec<f64>>,
     large_model_times: RwLock<Vec<f64>>,
     request_count: RwLock<u64>,
+    max_entries: usize,
 }
 
 impl StatsCollector {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            first_response_times: RwLock::new(Vec::new()),
+            total_response_times: RwLock::new(Vec::new()),
+            quick_response_times: RwLock::new(Vec::new()),
+            large_model_times: RwLock::new(Vec::new()),
+            request_count: RwLock::new(0),
+            max_entries,
+        }
     }
 
     pub fn add_request(
@@ -31,29 +39,40 @@ impl StatsCollector {
         quick_time: Option<f64>,
         large_time: Option<f64>,
     ) {
-        {
-            let mut first_times = self.first_response_times.write().unwrap();
-            first_times.push(first_response_time);
-        }
-        
-        {
-            let mut total_times = self.total_response_times.write().unwrap();
-            total_times.push(total_time);
-        }
+        // Acquire all locks in a consistent order to prevent deadlocks
+        let mut first_times = self.first_response_times.write().unwrap();
+        let mut total_times = self.total_response_times.write().unwrap();
+        let mut quick_times = self.quick_response_times.write().unwrap();
+        let mut large_times = self.large_model_times.write().unwrap();
+        let mut count = self.request_count.write().unwrap();
+
+        // Add new data points
+        first_times.push(first_response_time);
+        total_times.push(total_time);
 
         if let Some(quick_time) = quick_time {
-            let mut quick_times = self.quick_response_times.write().unwrap();
             quick_times.push(quick_time);
         }
 
         if let Some(large_time) = large_time {
-            let mut large_times = self.large_model_times.write().unwrap();
             large_times.push(large_time);
         }
 
-        {
-            let mut count = self.request_count.write().unwrap();
-            *count += 1;
+        *count += 1;
+
+        // Prevent memory leaks by limiting the number of stored entries
+        if first_times.len() > self.max_entries {
+            let remove_count = first_times.len() - self.max_entries;
+            first_times.drain(0..remove_count);
+            total_times.drain(0..remove_count);
+
+            // Handle optional data with different lengths
+            if quick_times.len() > remove_count {
+                quick_times.drain(0..remove_count);
+            }
+            if large_times.len() > remove_count {
+                large_times.drain(0..remove_count);
+            }
         }
     }
 
@@ -74,26 +93,19 @@ impl StatsCollector {
     }
 
     pub fn reset(&self) {
-        {
-            let mut first_times = self.first_response_times.write().unwrap();
-            first_times.clear();
-        }
-        {
-            let mut total_times = self.total_response_times.write().unwrap();
-            total_times.clear();
-        }
-        {
-            let mut quick_times = self.quick_response_times.write().unwrap();
-            quick_times.clear();
-        }
-        {
-            let mut large_times = self.large_model_times.write().unwrap();
-            large_times.clear();
-        }
-        {
-            let mut count = self.request_count.write().unwrap();
-            *count = 0;
-        }
+        // Acquire all locks in consistent order to prevent deadlocks
+        let mut first_times = self.first_response_times.write().unwrap();
+        let mut total_times = self.total_response_times.write().unwrap();
+        let mut quick_times = self.quick_response_times.write().unwrap();
+        let mut large_times = self.large_model_times.write().unwrap();
+        let mut count = self.request_count.write().unwrap();
+
+        // Clear all data
+        first_times.clear();
+        total_times.clear();
+        quick_times.clear();
+        large_times.clear();
+        *count = 0;
     }
 
     pub fn get_request_count(&self) -> u64 {
@@ -127,7 +139,7 @@ fn calculate_stats(data: &[f64]) -> LatencyStats {
     let avg = data.iter().sum::<f64>() / data.len() as f64;
     let min = sorted_data[0];
     let max = sorted_data[sorted_data.len() - 1];
-    
+
     let p50_idx = (sorted_data.len() as f64 * 0.5) as usize;
     let p50 = if p50_idx < sorted_data.len() {
         sorted_data[p50_idx]

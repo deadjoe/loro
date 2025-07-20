@@ -25,61 +25,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn test_health_check(client: &Client, base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_health_check(
+    client: &Client,
+    base_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Testing health check...");
-    
-    let response = client
-        .get(&format!("{}/health", base_url))
-        .send()
-        .await?;
-    
+
+    let response = client.get(&format!("{}/health", base_url)).send().await?;
+
     if response.status().is_success() {
         let body: serde_json::Value = response.json().await?;
         println!("✅ Health check: {:?}", body);
     } else {
         println!("❌ Health check failed: {}", response.status());
     }
-    
+
     Ok(())
 }
 
-async fn test_root_endpoint(client: &Client, base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_root_endpoint(
+    client: &Client,
+    base_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Testing root endpoint...");
-    
-    let response = client
-        .get(base_url)
-        .send()
-        .await?;
-    
+
+    let response = client.get(base_url).send().await?;
+
     if response.status().is_success() {
         let body: serde_json::Value = response.json().await?;
         println!("✅ Root endpoint: {:?}", body);
     } else {
         println!("❌ Root endpoint failed: {}", response.status());
     }
-    
+
     Ok(())
 }
 
-async fn test_metrics_reset(client: &Client, base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_metrics_reset(
+    client: &Client,
+    base_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Testing metrics reset...");
-    
+
     let response = client
         .post(&format!("{}/metrics/reset", base_url))
         .send()
         .await?;
-    
+
     if response.status().is_success() {
         let body: serde_json::Value = response.json().await?;
         println!("✅ Metrics reset: {:?}", body);
     } else {
         println!("❌ Metrics reset failed: {}", response.status());
     }
-    
+
     Ok(())
 }
 
-async fn test_voice_scenarios(client: &Client, base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_voice_scenarios(
+    client: &Client,
+    base_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("🎤 Testing voice assistant scenarios...");
 
     let test_scenarios = vec![
@@ -149,7 +155,10 @@ async fn test_voice_scenarios(client: &Client, base_url: &str) -> Result<(), Box
         println!("     Average first response: {:.3}s", quick_avg);
         println!("   Direct Mode:");
         println!("     Average first response: {:.3}s", direct_avg);
-        println!("   🚀 Improvement: {:.3}s ({:.1}% faster)", improvement, improvement_pct);
+        println!(
+            "   🚀 Improvement: {:.3}s ({:.1}% faster)",
+            improvement, improvement_pct
+        );
 
         println!("\n🎯 VOICE ASSISTANT ANALYSIS:");
         if quick_avg < 0.2 {
@@ -173,7 +182,11 @@ async fn test_voice_response(
     scenario: &TestScenario,
     disable_quick: bool,
 ) -> Result<f64, Box<dyn std::error::Error>> {
-    let mode_name = if disable_quick { "Direct Mode" } else { "Quick Response Mode" };
+    let mode_name = if disable_quick {
+        "Direct Mode"
+    } else {
+        "Quick Response Mode"
+    };
     println!("\n🎙️ {} Response:", mode_name);
 
     let request = ChatCompletionRequest {
@@ -187,7 +200,7 @@ async fn test_voice_response(
     };
 
     let start_time = Instant::now();
-    
+
     let response = client
         .post(&format!("{}/v1/chat/completions", base_url))
         .header("Content-Type", "application/json")
@@ -202,16 +215,16 @@ async fn test_voice_response(
 
     let mut first_chunk_time = None;
     let mut response_text = String::new();
-    
+
     // This is a simplified version - in reality you'd need to parse SSE format
     let bytes = response.bytes().await?;
     let text = String::from_utf8_lossy(&bytes);
-    
+
     // For demonstration, just record the time
     if first_chunk_time.is_none() {
         first_chunk_time = Some(start_time.elapsed().as_secs_f64());
     }
-    
+
     // Mock response for testing
     response_text = "Mock response received".to_string();
     println!("{}", response_text);
@@ -227,19 +240,16 @@ async fn test_voice_response(
 
 async fn test_metrics(client: &Client, base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📈 Server Metrics:");
-    
-    let response = client
-        .get(&format!("{}/metrics", base_url))
-        .send()
-        .await?;
-    
+
+    let response = client.get(&format!("{}/metrics", base_url)).send().await?;
+
     if response.status().is_success() {
         let metrics: serde_json::Value = response.json().await?;
         println!("{:#}", metrics);
     } else {
         println!("❌ Failed to get metrics: {}", response.status());
     }
-    
+
     Ok(())
 }
 
