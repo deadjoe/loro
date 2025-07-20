@@ -25,7 +25,7 @@ pub struct LoroService {
 impl LoroService {
     pub async fn new(config: Config) -> Result<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(config.http_timeout_secs))
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -75,9 +75,21 @@ impl LoroService {
         let request_start = Instant::now();
         let request_id = Uuid::new_v4().to_string();
 
-        // Step 1: Get quick response
+        // Clone request data for concurrent access
+        let messages = request.messages.clone();
+        let model_name = request.model.clone();
+
+        // Start both models concurrently using tokio::join!
         let quick_start = Instant::now();
-        let quick_response = self.get_quick_response(&request.messages).await?;
+        let large_start = Instant::now();
+
+        let quick_task = self.get_quick_response(&messages);
+        let large_task = self.get_large_model_stream(request, None); // Will add prefix later
+
+        // Execute both tasks concurrently
+        let (quick_result, large_stream_result) = tokio::join!(quick_task, large_task);
+
+        let quick_response = quick_result?;
         let quick_time = quick_start.elapsed().as_secs_f64();
 
         debug!(
@@ -90,7 +102,7 @@ impl LoroService {
             id: format!("chatcmpl-{request_id}"),
             object: "chat.completion.chunk".to_string(),
             created: chrono::Utc::now().timestamp(),
-            model: request.model.clone(),
+            model: model_name,
             choices: vec![ChoiceDelta {
                 index: 0,
                 delta: MessageDelta {
@@ -103,11 +115,8 @@ impl LoroService {
 
         let first_chunk_data = format!("data: {}\n\n", serde_json::to_string(&first_chunk)?);
 
-        // Step 2: Start large model request in parallel
-        let large_start = Instant::now();
-        let large_stream = self
-            .get_large_model_stream(request, Some(quick_response.clone()))
-            .await?;
+        // Get large model stream (already started concurrently)
+        let large_stream = large_stream_result?;
 
         let stats = Arc::clone(&self.quick_stats);
         let enhanced_stream = large_stream.enumerate().map(move |(i, chunk_result)| {
@@ -227,6 +236,9 @@ impl LoroService {
             messages: prompt_messages,
             max_tokens: Some(10),
             temperature: Some(0.3),
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
             stop: None,
             stream: false,
             extra_body: Some(json!({"enable_thinking": false})),
@@ -317,6 +329,9 @@ impl LoroService {
             messages: enhanced_messages,
             max_tokens: request.max_tokens.or(Some(150)),
             temperature: Some(request.temperature),
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
             stop: request.stop.clone(),
             stream: true,
             extra_body: Some(extra_body),
@@ -352,61 +367,81 @@ impl LoroService {
         let request_id = Uuid::new_v4().to_string();
         let model_name = request.model.clone();
 
+        // Simplified SSE parsing - process each chunk individually
         let stream = byte_stream
             .map(move |chunk_result| match chunk_result {
                 Ok(bytes) => {
                     let data = String::from_utf8_lossy(&bytes);
-                    Self::process_sse_chunk_static(&data, &request_id, &model_name)
+                    // Process all lines in this chunk
+                    let mut results = Vec::new();
+                    for line in data.lines() {
+                        if !line.trim().is_empty() {
+                            match Self::process_sse_line_static(line, &request_id, &model_name) {
+                                Ok(Some(chunk)) => results.push(Ok(chunk)),
+                                Ok(None) => {} // Skip empty chunks
+                                Err(e) => results.push(Err(e)),
+                            }
+                        }
+                    }
+                    futures::stream::iter(results)
                 }
-                Err(e) => Err(anyhow::anyhow!("Stream error: {}", e)),
+                Err(e) => futures::stream::iter(vec![Err(anyhow::anyhow!("Stream error: {}", e))]),
             })
-            .filter_map(|result| async move {
-                match result {
-                    Ok(Some(chunk)) => Some(Ok(chunk)),
-                    Ok(None) => None, // Skip empty chunks
-                    Err(e) => Some(Err(e)),
-                }
-            });
+            .flatten();
 
         Ok(Box::pin(stream))
     }
 
-    fn process_sse_chunk_static(
-        data: &str,
+    fn process_sse_line_static(
+        line: &str,
         request_id: &str,
         model_name: &str,
     ) -> Result<Option<String>> {
-        for line in data.lines() {
-            if let Some(json_data) = line.strip_prefix("data: ") {
-                if json_data == "[DONE]" {
-                    return Ok(None);
-                }
+        // Handle SSE format: "data: {json}" or "data: [DONE]"
+        if let Some(json_data) = line.strip_prefix("data: ") {
+            if json_data.trim() == "[DONE]" {
+                return Ok(None);
+            }
 
-                if let Ok(openai_chunk) = serde_json::from_str::<OpenAIResponse>(json_data) {
+            // Skip empty data lines
+            if json_data.trim().is_empty() {
+                return Ok(None);
+            }
+
+            // Parse the JSON chunk
+            match serde_json::from_str::<OpenAIResponse>(json_data) {
+                Ok(openai_chunk) => {
                     if let Some(choice) = openai_chunk.choices.first() {
                         if let Some(delta) = &choice.delta {
                             if let Some(content) = &delta.content {
-                                let chunk = ChatCompletionChunk {
-                                    id: format!("chatcmpl-{request_id}"),
-                                    object: "chat.completion.chunk".to_string(),
-                                    created: chrono::Utc::now().timestamp(),
-                                    model: model_name.to_string(),
-                                    choices: vec![ChoiceDelta {
-                                        index: 0,
-                                        delta: MessageDelta {
-                                            role: delta.role.clone(),
-                                            content: Some(content.clone()),
-                                        },
-                                        finish_reason: choice.finish_reason.clone(),
-                                    }],
-                                };
+                                // Only process chunks with actual content
+                                if !content.is_empty() {
+                                    let chunk = ChatCompletionChunk {
+                                        id: format!("chatcmpl-{request_id}"),
+                                        object: "chat.completion.chunk".to_string(),
+                                        created: chrono::Utc::now().timestamp(),
+                                        model: model_name.to_string(),
+                                        choices: vec![ChoiceDelta {
+                                            index: 0,
+                                            delta: MessageDelta {
+                                                role: delta.role.clone(),
+                                                content: Some(content.clone()),
+                                            },
+                                            finish_reason: choice.finish_reason.clone(),
+                                        }],
+                                    };
 
-                                let chunk_data =
-                                    format!("data: {}\n\n", serde_json::to_string(&chunk)?);
-                                return Ok(Some(chunk_data));
+                                    let chunk_data =
+                                        format!("data: {}\n\n", serde_json::to_string(&chunk)?);
+                                    return Ok(Some(chunk_data));
+                                }
                             }
                         }
                     }
+                }
+                Err(e) => {
+                    // Log parsing errors but don't fail the entire stream
+                    warn!("Failed to parse SSE chunk: {}, data: {}", e, json_data);
                 }
             }
         }

@@ -299,3 +299,148 @@ async fn test_memory_limit_enforcement() {
     let stats = collector.get_stats();
     assert!(stats["total_requests"].as_u64().unwrap() > 0);
 }
+
+#[tokio::test]
+async fn test_full_server_integration() {
+    // Set up complete test environment
+    std::env::set_var("SMALL_MODEL_API_KEY", "test-small-key");
+    std::env::set_var("LARGE_MODEL_API_KEY", "test-large-key");
+    std::env::set_var("HOST", "127.0.0.1");
+    std::env::set_var("PORT", "0"); // Use random port
+    std::env::set_var("HTTP_TIMEOUT_SECS", "30");
+    std::env::set_var("SMALL_MODEL_TIMEOUT_SECS", "5");
+    std::env::set_var("MAX_RETRIES", "3");
+    std::env::set_var("STATS_MAX_ENTRIES", "1000");
+
+    // Test config loading
+    let config = Config::from_env().expect("Config should load successfully");
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.http_timeout_secs, 30);
+    assert_eq!(config.small_model_timeout_secs, 5);
+    assert_eq!(config.max_retries, 3);
+    assert_eq!(config.stats_max_entries, 1000);
+
+    // Test service creation
+    let service = LoroService::new(config)
+        .await
+        .expect("Service should initialize");
+    let service = Arc::new(service);
+
+    // Test that service can handle multiple request types
+    let test_requests = vec![
+        ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "你好".to_string(), // Greeting
+            }],
+            max_tokens: Some(50),
+            temperature: 0.7,
+            stream: true,
+            stop: None,
+            disable_quick_response: false,
+        },
+        ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "What is the weather like?".to_string(), // Question
+            }],
+            max_tokens: Some(100),
+            temperature: 0.5,
+            stream: true,
+            stop: None,
+            disable_quick_response: true, // Test direct mode
+        },
+    ];
+
+    // Test that requests don't panic or deadlock
+    for (i, request) in test_requests.into_iter().enumerate() {
+        let service_clone = service.clone();
+        let result = tokio::spawn(async move {
+            // These will fail due to no real API endpoints, but shouldn't panic
+            let _result = service_clone.chat_completion(request).await;
+            i
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Request {} should complete without panic",
+            i
+        );
+    }
+
+    // Test metrics collection
+    let metrics = service.get_metrics().await;
+    assert!(metrics.is_object(), "Metrics should be a JSON object");
+
+    let quick_mode = metrics.get("quick_response_mode");
+    let direct_mode = metrics.get("direct_mode");
+    let comparison = metrics.get("comparison");
+
+    assert!(
+        quick_mode.is_some(),
+        "Should have quick response mode metrics"
+    );
+    assert!(direct_mode.is_some(), "Should have direct mode metrics");
+    assert!(comparison.is_some(), "Should have comparison metrics");
+
+    // Test metrics reset
+    service.reset_metrics().await;
+    let reset_metrics = service.get_metrics().await;
+
+    // After reset, request counts should be 0
+    let comparison_after_reset = reset_metrics["comparison"].as_object().unwrap();
+    let quick_requests = comparison_after_reset["quick_mode_requests"]
+        .as_u64()
+        .unwrap();
+    let direct_requests = comparison_after_reset["direct_mode_requests"]
+        .as_u64()
+        .unwrap();
+
+    assert_eq!(
+        quick_requests, 0,
+        "Quick mode requests should be reset to 0"
+    );
+    assert_eq!(
+        direct_requests, 0,
+        "Direct mode requests should be reset to 0"
+    );
+}
+
+#[tokio::test]
+async fn test_stats_percentile_comprehensive() {
+    use loro::stats::calculate_stats;
+
+    // Test empty data
+    let empty_stats = calculate_stats(&[]);
+    assert_eq!(empty_stats.avg, 0.0);
+    assert_eq!(empty_stats.min, 0.0);
+    assert_eq!(empty_stats.max, 0.0);
+    assert_eq!(empty_stats.p50, 0.0);
+    assert_eq!(empty_stats.p95, 0.0);
+
+    // Test single data point
+    let single_stats = calculate_stats(&[5.0]);
+    assert_eq!(single_stats.avg, 5.0);
+    assert_eq!(single_stats.min, 5.0);
+    assert_eq!(single_stats.max, 5.0);
+    assert_eq!(single_stats.p50, 5.0);
+    assert_eq!(single_stats.p95, 5.0);
+
+    // Test two data points
+    let two_stats = calculate_stats(&[3.0, 7.0]);
+    assert_eq!(two_stats.avg, 5.0);
+    assert_eq!(two_stats.min, 3.0);
+    assert_eq!(two_stats.max, 7.0);
+
+    // Test large dataset
+    let large_data: Vec<f64> = (1..=1000).map(|i| i as f64).collect();
+    let large_stats = calculate_stats(&large_data);
+    assert!((large_stats.avg - 500.5).abs() < 0.1);
+    assert_eq!(large_stats.min, 1.0);
+    assert_eq!(large_stats.max, 1000.0);
+    assert!((large_stats.p50 - 500.0).abs() < 10.0); // Should be around median
+    assert!((large_stats.p95 - 950.0).abs() < 50.0); // Should be around 95th percentile
+}

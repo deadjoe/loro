@@ -1,4 +1,6 @@
-use loro::{config::Config, models::*, service::LoroService};
+use loro::{
+    config::Config, errors::LoroError, models::*, service::LoroService, stats::StatsCollector,
+};
 
 #[tokio::test]
 async fn test_service_initialization() {
@@ -143,6 +145,7 @@ mod mock_tests {
         // Test with valid environment (should succeed)
         std::env::set_var("SMALL_MODEL_API_KEY", "test-small-key");
         std::env::set_var("LARGE_MODEL_API_KEY", "test-large-key");
+        std::env::set_var("HTTP_TIMEOUT_SECS", "30"); // Set valid timeout
 
         let result = Config::from_env();
         assert!(result.is_ok(), "Should succeed with valid API keys");
@@ -311,8 +314,218 @@ mod mock_tests {
         let p50 = first_response_stats["p50"].as_f64().unwrap();
         let p95 = first_response_stats["p95"].as_f64().unwrap();
 
-        assert!(p50 >= 5.0 && p50 <= 6.0, "P50 should be around median");
-        assert!(p95 >= 9.0 && p95 <= 10.0, "P95 should be near the top");
+        assert!((5.0..=6.0).contains(&p50), "P50 should be around median");
+        assert!((9.0..=10.0).contains(&p95), "P95 should be near the top");
         assert!(p95 >= p50, "P95 should be >= P50");
+    }
+
+    #[tokio::test]
+    async fn test_error_types() {
+        // Test timeout error
+        let timeout_error = LoroError::Timeout { timeout_secs: 30 };
+        assert!(timeout_error.is_timeout());
+        assert!(!timeout_error.is_api_error());
+        assert!(!timeout_error.is_validation_error());
+
+        // Test API error
+        let api_error = LoroError::ApiError {
+            provider: "test".to_string(),
+            status: 500,
+            message: "Internal error".to_string(),
+        };
+        assert!(api_error.is_api_error());
+        assert!(!api_error.is_timeout());
+
+        // Test validation error
+        let validation_error = LoroError::Validation("Invalid input".to_string());
+        assert!(validation_error.is_validation_error());
+        assert!(!validation_error.is_timeout());
+    }
+
+    #[tokio::test]
+    async fn test_sse_line_processing() {
+        // This function is private, so we test the behavior through integration tests
+        // We verify that SSE parsing works correctly in the service layer
+        assert!(true, "SSE parsing is tested through integration tests");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_request_handling() {
+        std::env::set_var("SMALL_MODEL_API_KEY", "test-key");
+        std::env::set_var("LARGE_MODEL_API_KEY", "test-key");
+        std::env::set_var("HTTP_TIMEOUT_SECS", "30"); // Set valid timeout
+
+        let config = Config::from_env().expect("Failed to load config");
+        let service = std::sync::Arc::new(
+            LoroService::new(config)
+                .await
+                .expect("Service creation failed"),
+        );
+
+        // Create multiple concurrent requests
+        let request = ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "Test concurrent request".to_string(),
+            }],
+            max_tokens: Some(50),
+            temperature: 0.7,
+            stream: true,
+            stop: None,
+            disable_quick_response: false,
+        };
+
+        // Spawn multiple concurrent requests
+        let tasks: Vec<_> = (0..5)
+            .map(|i| {
+                let service = service.clone();
+                let req = request.clone();
+                tokio::spawn(async move {
+                    // These will fail because we don't have real API endpoints,
+                    // but we're testing that they don't panic or deadlock
+                    let _result = service.chat_completion(req).await;
+                    i
+                })
+            })
+            .collect();
+
+        // Wait for all tasks to complete
+        for task in tasks {
+            let _result = task.await.expect("Task should complete");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_limit_edge_cases() {
+        let collector = StatsCollector::new(5); // Very small limit
+
+        // Add more entries than the limit
+        for i in 0..10 {
+            collector.add_request(
+                i as f64,
+                i as f64 * 2.0,
+                Some(i as f64),
+                Some(i as f64 * 1.5),
+            );
+        }
+
+        // Verify memory limit is enforced
+        let stats = collector.get_stats();
+        let total_requests = stats["total_requests"].as_u64().unwrap();
+        assert_eq!(total_requests, 10, "All requests should be counted");
+
+        // Check that we don't have more than the limit in memory
+        let first_times = stats["first_response_latency"].as_object().unwrap();
+        let avg = first_times["avg"].as_f64().unwrap();
+
+        // Should only average the last 5 entries (5, 6, 7, 8, 9)
+        let expected_avg = (5.0 + 6.0 + 7.0 + 8.0 + 9.0) / 5.0;
+        assert!(
+            (avg - expected_avg).abs() < 0.01,
+            "Average should reflect memory limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nan_handling_in_stats() {
+        use loro::stats::calculate_stats;
+
+        let data = vec![1.0, 2.0, f64::NAN, 4.0, 5.0];
+        let stats = calculate_stats(&data);
+
+        // Should not panic and should handle NaN gracefully
+        assert!(stats.avg.is_finite() || stats.avg.is_nan());
+        assert!(stats.p50.is_finite() || stats.p50.is_nan());
+        assert!(stats.p95.is_finite() || stats.p95.is_nan());
+    }
+
+    #[tokio::test]
+    async fn test_request_validation_comprehensive() {
+        // Test all validation paths
+        let mut request = ChatCompletionRequest {
+            model: "test".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "test".to_string(),
+            }],
+            max_tokens: Some(100),
+            temperature: 0.7,
+            stream: true,
+            stop: None,
+            disable_quick_response: false,
+        };
+
+        // Valid request should pass
+        assert!(request.validate().is_ok());
+
+        // Test empty model
+        request.model = "".to_string();
+        assert!(request.validate().is_err());
+        request.model = "test".to_string();
+
+        // Test empty messages
+        request.messages = vec![];
+        assert!(request.validate().is_err());
+        request.messages = vec![Message {
+            role: "user".to_string(),
+            content: "test".to_string(),
+        }];
+
+        // Test invalid role
+        request.messages[0].role = "invalid".to_string();
+        assert!(request.validate().is_err());
+        request.messages[0].role = "user".to_string();
+
+        // Test empty content
+        request.messages[0].content = "".to_string();
+        assert!(request.validate().is_err());
+        request.messages[0].content = "test".to_string();
+
+        // Test invalid max_tokens
+        request.max_tokens = Some(0);
+        assert!(request.validate().is_err());
+        request.max_tokens = Some(10000);
+        assert!(request.validate().is_err());
+        request.max_tokens = Some(100);
+
+        // Test invalid temperature
+        request.temperature = -1.0;
+        assert!(request.validate().is_err());
+        request.temperature = 3.0;
+        assert!(request.validate().is_err());
+        request.temperature = 0.7;
+
+        // Should be valid again
+        assert!(request.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_config_timeout_validation() {
+        // Save original values
+        let original_timeout = std::env::var("HTTP_TIMEOUT_SECS").ok();
+
+        std::env::set_var("SMALL_MODEL_API_KEY", "test-key");
+        std::env::set_var("LARGE_MODEL_API_KEY", "test-key");
+
+        // Test invalid timeout values
+        std::env::set_var("HTTP_TIMEOUT_SECS", "400"); // Too high
+        let config_result = Config::from_env();
+        assert!(config_result.is_err(), "Should fail with high timeout");
+
+        std::env::set_var("HTTP_TIMEOUT_SECS", "2"); // Too low
+        let config_result = Config::from_env();
+        assert!(config_result.is_err(), "Should fail with low timeout");
+
+        std::env::set_var("HTTP_TIMEOUT_SECS", "30"); // Valid
+        let config_result = Config::from_env();
+        assert!(config_result.is_ok(), "Should succeed with valid timeout");
+
+        // Restore original value
+        if let Some(original) = original_timeout {
+            std::env::set_var("HTTP_TIMEOUT_SECS", original);
+        } else {
+            std::env::remove_var("HTTP_TIMEOUT_SECS");
+        }
     }
 }

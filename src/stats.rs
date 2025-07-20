@@ -122,7 +122,7 @@ impl StatsCollector {
     }
 }
 
-fn calculate_stats(data: &[f64]) -> LatencyStats {
+pub fn calculate_stats(data: &[f64]) -> LatencyStats {
     if data.is_empty() {
         return LatencyStats {
             avg: 0.0,
@@ -134,7 +134,7 @@ fn calculate_stats(data: &[f64]) -> LatencyStats {
     }
 
     let mut sorted_data = data.to_vec();
-    sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let avg = data.iter().sum::<f64>() / data.len() as f64;
     let min = sorted_data[0];
