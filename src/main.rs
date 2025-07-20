@@ -22,13 +22,17 @@ use service::LoroService;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
+    // Initialize tracing with performance optimizations
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "loro=debug,tower_http=debug".into()),
         )
+        .with_target(false)  // Reduce logging overhead in production
         .init();
+
+    // Performance hint: Consider setting thread affinity in production
+    // e.g., use taskset on Linux or thread affinity APIs
 
     // Load configuration
     let config = Config::from_env()?;

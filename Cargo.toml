@@ -10,7 +10,7 @@ tokio = { version = "1.0", features = ["full"] }
 axum = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", features = ["json", "stream"] }
+reqwest = { version = "0.11", features = ["json", "stream", "gzip", "brotli"] }
 futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -20,10 +20,17 @@ dotenvy = "0.15"
 anyhow = "1.0"
 thiserror = "1.0"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-br", "compression-gzip"] }
 hyper = "1.0"
 bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+# 启用更激进的编译期优化
+lto = true              # 链接时优化
+codegen-units = 1       # 单个代码生成单元以提高优化效果
+panic = "abort"         # 减少二进制大小和提高性能
+strip = true            # 去除调试符号
 
 [[bin]]
 name = "loro"
