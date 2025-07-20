@@ -11,11 +11,13 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{info, warn};
 
 mod config;
+mod errors;
 mod models;
 mod service;
 mod stats;
 
 use config::Config;
+use errors::LoroError;
 use service::LoroService;
 
 #[tokio::main]
@@ -95,30 +97,42 @@ async fn chat_completions(
         Ok(response) => Ok(response),
         Err(e) => {
             warn!("Chat completion error: {}", e);
-            let error_response = if e.to_string().contains("timeout") {
-                (
+            let error_response = match e.downcast_ref::<LoroError>() {
+                Some(LoroError::Timeout { timeout_secs }) => (
                     StatusCode::REQUEST_TIMEOUT,
                     Json(serde_json::json!({
                         "error": {
-                            "message": "Request timeout",
+                            "message": format!("Request timeout after {}s", timeout_secs),
                             "type": "timeout_error",
                             "code": "request_timeout"
                         }
                     })),
-                )
-            } else if e.to_string().contains("API error") {
-                (
+                ),
+                Some(LoroError::ApiError {
+                    provider,
+                    status,
+                    message,
+                }) => (
                     StatusCode::BAD_GATEWAY,
                     Json(serde_json::json!({
                         "error": {
-                            "message": "Upstream API error",
+                            "message": format!("API error from {}: {}", provider, message),
                             "type": "api_error",
                             "code": "upstream_error"
                         }
                     })),
-                )
-            } else {
-                (
+                ),
+                Some(LoroError::Validation(msg)) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": msg,
+                            "type": "invalid_request_error",
+                            "code": "validation_failed"
+                        }
+                    })),
+                ),
+                _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
                         "error": {
@@ -127,7 +141,7 @@ async fn chat_completions(
                             "code": "internal_error"
                         }
                     })),
-                )
+                ),
             };
             Err(error_response)
         }
