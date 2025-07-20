@@ -1,0 +1,33 @@
+[package]
+name = "loro"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance AI voice assistant with dual-model streaming response"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+axum = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+rand = "0.8"
+dotenvy = "0.15"
+anyhow = "1.0"
+thiserror = "1.0"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = "1.0"
+bytes = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[[bin]]
+name = "loro"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio-stream = "0.1"
