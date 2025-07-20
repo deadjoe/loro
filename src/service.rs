@@ -79,17 +79,9 @@ impl LoroService {
         let messages = request.messages.clone();
         let model_name = request.model.clone();
 
-        // Start both models concurrently using tokio::join!
+        // Step 1: Get quick response first
         let quick_start = Instant::now();
-        let large_start = Instant::now();
-
-        let quick_task = self.get_quick_response(&messages);
-        let large_task = self.get_large_model_stream(request, None); // Will add prefix later
-
-        // Execute both tasks concurrently
-        let (quick_result, large_stream_result) = tokio::join!(quick_task, large_task);
-
-        let quick_response = quick_result?;
+        let quick_response = self.get_quick_response(&messages).await?;
         let quick_time = quick_start.elapsed().as_secs_f64();
 
         debug!(
@@ -113,17 +105,23 @@ impl LoroService {
             }],
         };
 
-        let first_chunk_data = format!("data: {}\n\n", serde_json::to_string(&first_chunk)?);
+        // Optimize string formatting for better performance
+        let json_str = serde_json::to_string(&first_chunk)?;
+        let mut first_chunk_data = String::with_capacity(json_str.len() + 8);
+        first_chunk_data.push_str("data: ");
+        first_chunk_data.push_str(&json_str);
+        first_chunk_data.push_str("\n\n");
 
-        // Get large model stream (already started concurrently)
-        let large_stream = large_stream_result?;
+        // Step 2: Get large model stream with prefix
+        let large_start = Instant::now();
+        let large_stream = self.get_large_model_stream(request, Some(quick_response)).await?;
 
         let stats = Arc::clone(&self.quick_stats);
         let enhanced_stream = large_stream.enumerate().map(move |(i, chunk_result)| {
             match chunk_result {
                 Ok(chunk_data) => {
                     if i == 0 {
-                        // First chunk from large model
+                        // First chunk from large model - record stats
                         let large_time = large_start.elapsed().as_secs_f64();
                         let total_time = request_start.elapsed().as_secs_f64();
 
@@ -306,11 +304,12 @@ impl LoroService {
         request: ChatCompletionRequest,
         prefix: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        // Enhance messages with voice assistant context
-        let mut enhanced_messages = vec![HashMap::from([
+        // Enhance messages with voice assistant context - pre-allocate for performance
+        let mut enhanced_messages = Vec::with_capacity(request.messages.len() + 1);
+        enhanced_messages.push(HashMap::from([
             ("role".to_string(), "system".to_string()),
             ("content".to_string(), "你是一个友好的AI语音助手，用自然对话的方式回应用户。回答要简洁明了，适合语音交互。".to_string()),
-        ])];
+        ]));
 
         for msg in &request.messages {
             enhanced_messages.push(HashMap::from([
@@ -367,19 +366,25 @@ impl LoroService {
         let request_id = Uuid::new_v4().to_string();
         let model_name = request.model.clone();
 
-        // Simplified SSE parsing - process each chunk individually
+        // Process SSE stream - handle each chunk individually for now
+        // TODO: Implement proper buffering for incomplete SSE chunks
         let stream = byte_stream
             .map(move |chunk_result| match chunk_result {
                 Ok(bytes) => {
                     let data = String::from_utf8_lossy(&bytes);
-                    // Process all lines in this chunk
                     let mut results = Vec::new();
+                    
+                    // Process each line in the received chunk
                     for line in data.lines() {
-                        if !line.trim().is_empty() {
+                        let line = line.trim();
+                        if !line.is_empty() {
                             match Self::process_sse_line_static(line, &request_id, &model_name) {
                                 Ok(Some(chunk)) => results.push(Ok(chunk)),
                                 Ok(None) => {} // Skip empty chunks
-                                Err(e) => results.push(Err(e)),
+                                Err(e) => {
+                                    warn!("SSE parsing error: {}", e);
+                                    // Continue processing instead of failing the entire stream
+                                }
                             }
                         }
                     }
@@ -392,7 +397,7 @@ impl LoroService {
         Ok(Box::pin(stream))
     }
 
-    fn process_sse_line_static(
+    pub fn process_sse_line_static(
         line: &str,
         request_id: &str,
         model_name: &str,
@@ -403,48 +408,85 @@ impl LoroService {
                 return Ok(None);
             }
 
-            // Skip empty data lines
-            if json_data.trim().is_empty() {
+            // Skip empty data lines and event lines
+            let json_data = json_data.trim();
+            if json_data.is_empty() {
                 return Ok(None);
             }
 
-            // Parse the JSON chunk
+            // Parse the JSON chunk with improved error handling
             match serde_json::from_str::<OpenAIResponse>(json_data) {
                 Ok(openai_chunk) => {
                     if let Some(choice) = openai_chunk.choices.first() {
-                        if let Some(delta) = &choice.delta {
-                            if let Some(content) = &delta.content {
-                                // Only process chunks with actual content
-                                if !content.is_empty() {
-                                    let chunk = ChatCompletionChunk {
-                                        id: format!("chatcmpl-{request_id}"),
-                                        object: "chat.completion.chunk".to_string(),
-                                        created: chrono::Utc::now().timestamp(),
-                                        model: model_name.to_string(),
-                                        choices: vec![ChoiceDelta {
-                                            index: 0,
-                                            delta: MessageDelta {
-                                                role: delta.role.clone(),
-                                                content: Some(content.clone()),
-                                            },
-                                            finish_reason: choice.finish_reason.clone(),
-                                        }],
-                                    };
+                        // Handle both message and delta fields for compatibility
+                        let (content, role, finish_reason) = if let Some(delta) = &choice.delta {
+                            (delta.content.as_ref(), delta.role.as_ref(), choice.finish_reason.as_ref())
+                        } else if let Some(message) = &choice.message {
+                            (message.content.as_ref(), message.role.as_ref(), choice.finish_reason.as_ref())
+                        } else {
+                            (None, None, choice.finish_reason.as_ref())
+                        };
 
-                                    let chunk_data =
-                                        format!("data: {}\n\n", serde_json::to_string(&chunk)?);
-                                    return Ok(Some(chunk_data));
-                                }
+                        if let Some(content) = content {
+                            // Only process chunks with actual content
+                            if !content.is_empty() {
+                                let chunk = ChatCompletionChunk {
+                                    id: format!("chatcmpl-{request_id}"),
+                                    object: "chat.completion.chunk".to_string(),
+                                    created: chrono::Utc::now().timestamp(),
+                                    model: model_name.to_string(),
+                                    choices: vec![ChoiceDelta {
+                                        index: 0,
+                                        delta: MessageDelta {
+                                            role: role.cloned(),
+                                            content: Some(content.clone()),
+                                        },
+                                        finish_reason: finish_reason.cloned(),
+                                    }],
+                                };
+
+                                let chunk_data =
+                                    format!("data: {}\n\n", serde_json::to_string(&chunk)?);
+                                return Ok(Some(chunk_data));
                             }
+                        }
+                        
+                        // Handle finish_reason without content (end of stream)
+                        if finish_reason.is_some() && content.is_none() {
+                            let chunk = ChatCompletionChunk {
+                                id: format!("chatcmpl-{request_id}"),
+                                object: "chat.completion.chunk".to_string(),
+                                created: chrono::Utc::now().timestamp(),
+                                model: model_name.to_string(),
+                                choices: vec![ChoiceDelta {
+                                    index: 0,
+                                    delta: MessageDelta {
+                                        role: None,
+                                        content: None,
+                                    },
+                                    finish_reason: finish_reason.cloned(),
+                                }],
+                            };
+
+                            // Optimize string formatting
+                            let json_str = serde_json::to_string(&chunk)?;
+                            let mut chunk_data = String::with_capacity(json_str.len() + 8);
+                            chunk_data.push_str("data: ");
+                            chunk_data.push_str(&json_str);
+                            chunk_data.push_str("\n\n");
+                            return Ok(Some(chunk_data));
                         }
                     }
                 }
                 Err(e) => {
-                    // Log parsing errors but don't fail the entire stream
-                    warn!("Failed to parse SSE chunk: {}, data: {}", e, json_data);
+                    // Don't return an error, just log and skip this chunk
+                    debug!("Skipping malformed SSE chunk: {}, data: {}", e, json_data);
+                    return Ok(None);
                 }
             }
         }
+        
+        // Skip non-data lines (like event: lines)
         Ok(None)
     }
 

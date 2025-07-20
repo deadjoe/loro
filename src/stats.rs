@@ -60,9 +60,12 @@ impl StatsCollector {
 
         *count += 1;
 
-        // Prevent memory leaks by limiting the number of stored entries
+        // Efficient memory management with reserve and batch removal
         if first_times.len() > self.max_entries {
-            let remove_count = first_times.len() - self.max_entries;
+            let keep_count = self.max_entries * 3 / 4; // Keep 75% to reduce frequent reallocations
+            let remove_count = first_times.len() - keep_count;
+            
+            // Use efficient rotation to avoid multiple allocations
             first_times.drain(0..remove_count);
             total_times.drain(0..remove_count);
 
@@ -73,6 +76,10 @@ impl StatsCollector {
             if large_times.len() > remove_count {
                 large_times.drain(0..remove_count);
             }
+            
+            // Pre-reserve space to avoid future reallocations
+            first_times.reserve(self.max_entries / 4);
+            total_times.reserve(self.max_entries / 4);
         }
     }
 
@@ -133,26 +140,39 @@ pub fn calculate_stats(data: &[f64]) -> LatencyStats {
         };
     }
 
-    let mut sorted_data = data.to_vec();
+    // Filter out NaN values and sort
+    let filtered_data: Vec<f64> = data.iter().filter(|&&x| x.is_finite()).copied().collect();
+    if filtered_data.is_empty() {
+        return LatencyStats {
+            avg: 0.0,
+            min: 0.0,
+            max: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+        };
+    }
+    
+    let mut sorted_data = filtered_data;
     sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let avg = data.iter().sum::<f64>() / data.len() as f64;
+    let avg = sorted_data.iter().sum::<f64>() / sorted_data.len() as f64;
     let min = sorted_data[0];
     let max = sorted_data[sorted_data.len() - 1];
 
-    let p50_idx = (sorted_data.len() as f64 * 0.5) as usize;
-    let p50 = if p50_idx < sorted_data.len() {
-        sorted_data[p50_idx]
+    // Use proper percentile calculation (0-based indexing)
+    let p50_idx = if sorted_data.len() == 1 {
+        0
     } else {
-        sorted_data[sorted_data.len() - 1]
+        ((sorted_data.len() - 1) as f64 * 0.5) as usize
     };
+    let p50 = sorted_data[p50_idx];
 
-    let p95_idx = (sorted_data.len() as f64 * 0.95) as usize;
-    let p95 = if p95_idx < sorted_data.len() {
-        sorted_data[p95_idx]
+    let p95_idx = if sorted_data.len() == 1 {
+        0
     } else {
-        sorted_data[sorted_data.len() - 1]
+        ((sorted_data.len() - 1) as f64 * 0.95) as usize
     };
+    let p95 = sorted_data[p95_idx];
 
     LatencyStats {
         avg,
