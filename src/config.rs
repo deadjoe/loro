@@ -78,13 +78,18 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        // Validate API keys are not empty
+        // Validate API keys are not empty (allow "none" for local services like Ollama)
         if self.small_model.api_key.trim().is_empty() {
             return Err(anyhow::anyhow!("SMALL_MODEL_API_KEY cannot be empty"));
         }
         if self.large_model.api_key.trim().is_empty() {
             return Err(anyhow::anyhow!("LARGE_MODEL_API_KEY cannot be empty"));
         }
+        
+        // For local services (like Ollama), API key can be "none"
+        // No additional validation needed for API key content
+        
+        // Note: "none" is accepted as a valid API key for local services like Ollama
 
         // Validate URLs
         if !self.small_model.base_url.starts_with("http") {

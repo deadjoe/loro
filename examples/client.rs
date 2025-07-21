@@ -8,7 +8,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Make sure the server is running on http://127.0.0.1:8000");
     println!();
 
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .no_proxy()  // Disable proxy in case there's interference
+        .build()?;
     let base_url = "http://127.0.0.1:8000";
 
     // Test basic endpoints
@@ -29,13 +33,25 @@ async fn test_health_check(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Testing health check...");
 
-    let response = client.get(&format!("{}/health", base_url)).send().await?;
-
-    if response.status().is_success() {
-        let body: serde_json::Value = response.json().await?;
-        println!("✅ Health check: {:?}", body);
-    } else {
-        println!("❌ Health check failed: {}", response.status());
+    match client.get(&format!("{}/health", base_url)).send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                let body: serde_json::Value = response.json().await?;
+                println!("✅ Health check: {:?}", body);
+            } else {
+                println!("❌ Health check failed: {}", response.status());
+            }
+        }
+        Err(e) => {
+            println!("❌ Health check request error: {}", e);
+            if e.is_connect() {
+                println!("   Connection error - is the server running?");
+            } else if e.is_timeout() {
+                println!("   Timeout error");
+            } else if e.is_request() {
+                println!("   Request error");
+            }
+        }
     }
 
     Ok(())
