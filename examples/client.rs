@@ -1,8 +1,6 @@
 use loro::models::*;
 use reqwest::Client;
-use serde_json::json;
 use std::time::Instant;
-use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -214,7 +212,6 @@ async fn test_voice_response(
     }
 
     let mut first_chunk_time = None;
-    let mut response_text = String::new();
 
     // This is a simplified version - in reality you'd need to parse SSE format
     let bytes = response.bytes().await?;
@@ -225,9 +222,9 @@ async fn test_voice_response(
         first_chunk_time = Some(start_time.elapsed().as_secs_f64());
     }
 
-    // Mock response for testing
-    response_text = "Mock response received".to_string();
-    println!("{}", response_text);
+    // Store the actual response (in real implementation, this would accumulate chunks)
+    let response_text = text.to_string();
+    println!("📝 Response: {}", response_text);
 
     if let Some(first_response_time) = first_chunk_time {
         println!("⏱️ First response time: {:.3}s", first_response_time);

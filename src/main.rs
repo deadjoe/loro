@@ -114,7 +114,7 @@ async fn chat_completions(
                 ),
                 Some(LoroError::ApiError {
                     provider,
-                    status,
+                    status: _,
                     message,
                 }) => (
                     StatusCode::BAD_GATEWAY,
