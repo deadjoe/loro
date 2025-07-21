@@ -258,9 +258,9 @@ loro/
 │   └── end_to_end_test.rs   # End-to-end system tests
 ├── examples/
 │   └── client.rs        # Example client with benchmarking
-└── references/          # Original Python implementation (local only)
-    ├── main.py         # Reference server implementation
-    └── client.py       # Reference client implementation
+├── Cargo.toml           # Project dependencies and metadata
+├── LICENSE              # AGPL-3.0 license file
+└── README.md            # Project documentation
 ```
 
 ### Development Workflow
@@ -313,21 +313,6 @@ To integrate additional AI model providers:
 - **Security**: Configure proper firewall rules and TLS termination
 - **Scaling**: Consider load balancing for high-traffic scenarios
 
-### Docker Deployment (Future)
-
-```dockerfile
-# Multi-stage build for optimized production image
-FROM rust:1.70 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates
-COPY --from=builder /app/target/release/loro /usr/local/bin/loro
-EXPOSE 8000
-CMD ["loro"]
-```
 
 ## 🤝 Contributing
 
