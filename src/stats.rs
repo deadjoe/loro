@@ -39,12 +39,18 @@ impl StatsCollector {
         quick_time: Option<f64>,
         large_time: Option<f64>,
     ) {
-        // Acquire all locks in a consistent order to prevent deadlocks
-        let mut first_times = self.first_response_times.write().unwrap();
-        let mut total_times = self.total_response_times.write().unwrap();
-        let mut quick_times = self.quick_response_times.write().unwrap();
-        let mut large_times = self.large_model_times.write().unwrap();
-        let mut count = self.request_count.write().unwrap();
+        // Safely acquire all locks in a consistent order to prevent deadlocks
+        // Use expect() with clear error messages instead of unwrap()
+        let mut first_times = self.first_response_times.write()
+            .expect("Failed to acquire write lock for first_response_times");
+        let mut total_times = self.total_response_times.write()
+            .expect("Failed to acquire write lock for total_response_times");
+        let mut quick_times = self.quick_response_times.write()
+            .expect("Failed to acquire write lock for quick_response_times");
+        let mut large_times = self.large_model_times.write()
+            .expect("Failed to acquire write lock for large_model_times");
+        let mut count = self.request_count.write()
+            .expect("Failed to acquire write lock for request_count");
 
         // Add new data points
         first_times.push(first_response_time);
@@ -84,11 +90,17 @@ impl StatsCollector {
     }
 
     pub fn get_stats(&self) -> serde_json::Value {
-        let first_times = self.first_response_times.read().unwrap();
-        let total_times = self.total_response_times.read().unwrap();
-        let quick_times = self.quick_response_times.read().unwrap();
-        let large_times = self.large_model_times.read().unwrap();
-        let count = *self.request_count.read().unwrap();
+        // Safely acquire read locks with descriptive error messages
+        let first_times = self.first_response_times.read()
+            .expect("Failed to acquire read lock for first_response_times");
+        let total_times = self.total_response_times.read()
+            .expect("Failed to acquire read lock for total_response_times");
+        let quick_times = self.quick_response_times.read()
+            .expect("Failed to acquire read lock for quick_response_times");
+        let large_times = self.large_model_times.read()
+            .expect("Failed to acquire read lock for large_model_times");
+        let count = *self.request_count.read()
+            .expect("Failed to acquire read lock for request_count");
 
         serde_json::json!({
             "total_requests": count,
@@ -100,12 +112,17 @@ impl StatsCollector {
     }
 
     pub fn reset(&self) {
-        // Acquire all locks in consistent order to prevent deadlocks
-        let mut first_times = self.first_response_times.write().unwrap();
-        let mut total_times = self.total_response_times.write().unwrap();
-        let mut quick_times = self.quick_response_times.write().unwrap();
-        let mut large_times = self.large_model_times.write().unwrap();
-        let mut count = self.request_count.write().unwrap();
+        // Safely acquire all locks in consistent order to prevent deadlocks
+        let mut first_times = self.first_response_times.write()
+            .expect("Failed to acquire write lock for first_response_times during reset");
+        let mut total_times = self.total_response_times.write()
+            .expect("Failed to acquire write lock for total_response_times during reset");
+        let mut quick_times = self.quick_response_times.write()
+            .expect("Failed to acquire write lock for quick_response_times during reset");
+        let mut large_times = self.large_model_times.write()
+            .expect("Failed to acquire write lock for large_model_times during reset");
+        let mut count = self.request_count.write()
+            .expect("Failed to acquire write lock for request_count during reset");
 
         // Clear all data
         first_times.clear();
@@ -116,11 +133,13 @@ impl StatsCollector {
     }
 
     pub fn get_request_count(&self) -> u64 {
-        *self.request_count.read().unwrap()
+        *self.request_count.read()
+            .expect("Failed to acquire read lock for request_count")
     }
 
     pub fn get_avg_first_response_time(&self) -> f64 {
-        let times = self.first_response_times.read().unwrap();
+        let times = self.first_response_times.read()
+            .expect("Failed to acquire read lock for first_response_times");
         if times.is_empty() {
             0.0
         } else {
@@ -155,6 +174,17 @@ pub fn calculate_stats(data: &[f64]) -> LatencyStats {
     let mut sorted_data = filtered_data;
     sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
+    // Double-check: sorted_data should not be empty after filtering
+    if sorted_data.is_empty() {
+        return LatencyStats {
+            avg: 0.0,
+            min: 0.0,
+            max: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+        };
+    }
+    
     let avg = sorted_data.iter().sum::<f64>() / sorted_data.len() as f64;
     let min = sorted_data[0];
     let max = sorted_data[sorted_data.len() - 1];

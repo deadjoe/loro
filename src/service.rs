@@ -200,11 +200,13 @@ impl LoroService {
         }
 
         // Fallback to predefined responses
-        let last_message = messages.last().unwrap(); // Safe because we checked above
+        let last_message = messages.last()
+            .expect("Messages array should not be empty (already checked)");
         let category = last_message.categorize();
         let responses = category.get_responses();
         let mut rng = rand::thread_rng();
-        let response = responses.choose(&mut rng).unwrap();
+        let response = responses.choose(&mut rng)
+            .expect("Predefined responses array should never be empty");
         Ok(response.to_string())
     }
 
@@ -213,7 +215,8 @@ impl LoroService {
             return Err(anyhow::anyhow!("Messages array cannot be empty"));
         }
 
-        let last_message = messages.last().unwrap(); // Safe due to check above
+        let last_message = messages.last()
+            .expect("Messages array should not be empty (already checked)");
         if last_message.content.trim().is_empty() {
             return Err(anyhow::anyhow!("Message content cannot be empty"));
         }
@@ -390,7 +393,33 @@ impl LoroService {
                     }
                     futures::stream::iter(results)
                 }
-                Err(e) => futures::stream::iter(vec![Err(anyhow::anyhow!("Stream error: {}", e))]),
+                Err(e) => {
+                    // Create error chunk similar to Python version
+                    let error_chunk = ChatCompletionChunk {
+                        id: format!("chatcmpl-{request_id}"),
+                        object: "chat.completion.chunk".to_string(),
+                        created: chrono::Utc::now().timestamp(),
+                        model: model_name.clone(),
+                        choices: vec![ChoiceDelta {
+                            index: 0,
+                            delta: MessageDelta {
+                                role: None,
+                                content: Some(" [抱歉，出现了问题]".to_string()),
+                            },
+                            finish_reason: Some("stop".to_string()),
+                        }],
+                    };
+                    
+                    if let Ok(json_str) = serde_json::to_string(&error_chunk) {
+                        let mut error_data = String::with_capacity(json_str.len() + 8);
+                        error_data.push_str("data: ");
+                        error_data.push_str(&json_str);
+                        error_data.push_str("\n\n");
+                        futures::stream::iter(vec![Ok(error_data)])
+                    } else {
+                        futures::stream::iter(vec![Err(anyhow::anyhow!("Stream error: {}", e))])
+                    }
+                }
             })
             .flatten();
 

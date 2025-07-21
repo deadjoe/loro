@@ -180,10 +180,10 @@ pub enum RequestCategory {
 impl RequestCategory {
     pub fn get_responses(&self) -> &'static [&'static str] {
         match self {
-            RequestCategory::Greeting => &["你好！", "嗨！", "您好，", "我在，"],
-            RequestCategory::Question => &["好的，", "这个，", "关于，", "我来，"],
-            RequestCategory::Request => &["好的，", "明白，", "我来，", "让我，"],
-            RequestCategory::Thinking => &["嗯，", "我觉得，", "让我，", "根据，"],
+            RequestCategory::Greeting => &["你好！", "嗨！", "您好，", "我在这里，"],
+            RequestCategory::Question => &["让我想想，", "这个问题，", "关于这个，", "我来解答，"],
+            RequestCategory::Request => &["好的，", "明白了，", "我来帮您，", "让我来，"],
+            RequestCategory::Thinking => &["嗯，", "我觉得，", "让我分析，", "根据情况，"],
         }
     }
 }
