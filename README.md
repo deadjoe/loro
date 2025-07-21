@@ -1,8 +1,5 @@
-<p align="center">
-  <img src="logo.png" alt="loro Logo" width="200"/>
-</p>
-
 # loro 
+![loro banner image](./logo.png)
 
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
