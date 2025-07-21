@@ -168,6 +168,25 @@ pub struct OpenAIMessage {
     pub content: Option<String>,
 }
 
+// Ollama API response structures
+#[derive(Debug, Clone, Deserialize)]
+pub struct OllamaResponse {
+    #[allow(dead_code)]
+    pub model: String,
+    #[allow(dead_code)]
+    pub created_at: String,
+    pub message: OllamaMessage,
+    #[allow(dead_code)]
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OllamaMessage {
+    #[allow(dead_code)]
+    pub role: String,
+    pub content: String,
+}
+
 // Quick response categories for voice assistant
 #[derive(Debug, Clone)]
 pub enum RequestCategory {

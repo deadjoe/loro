@@ -26,6 +26,10 @@ impl LoroService {
     pub async fn new(config: Config) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.http_timeout_secs))
+            .connect_timeout(Duration::from_secs(2))
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .no_proxy()  // Disable proxy for direct localhost connections
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -224,7 +228,7 @@ impl LoroService {
         let prompt_messages = vec![
             HashMap::from([
                 ("role".to_string(), "system".to_string()),
-                ("content".to_string(), "你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。".to_string()),
+                ("content".to_string(), "/no_think 你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。".to_string()),
             ]),
             HashMap::from([
                 ("role".to_string(), "user".to_string()),
@@ -232,33 +236,71 @@ impl LoroService {
             ]),
         ];
 
-        let request_body = OpenAIRequest {
-            model: self.config.small_model.model_name.clone(),
-            messages: prompt_messages,
-            max_tokens: Some(10),
-            temperature: Some(0.3),
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            stop: None,
-            stream: false,
-            extra_body: Some(json!({"enable_thinking": false})),
+        // Create request body appropriate for the target service
+        let request_body = if self.config.small_model.base_url.contains("11434") {
+            // Ollama-compatible request
+            let ollama_messages = vec![
+                json!({
+                    "role": "system",
+                    "content": "/no_think 你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。"
+                }),
+                json!({
+                    "role": "user", 
+                    "content": last_message.content.clone()
+                })
+            ];
+            json!({
+                "model": self.config.small_model.model_name,
+                "messages": ollama_messages,
+                "stream": false,
+                "keep_alive": "10m",
+                "options": {
+                    "temperature": 0.0,
+                    "num_predict": 3,
+                    "top_k": 1,
+                    "top_p": 0.1,
+                    "repeat_penalty": 1.0
+                }
+            })
+        } else {
+            // Full OpenAI-compatible request
+            serde_json::to_value(OpenAIRequest {
+                model: self.config.small_model.model_name.clone(),
+                messages: prompt_messages,
+                max_tokens: Some(10),
+                temperature: Some(0.3),
+                top_p: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                stop: None,
+                stream: false,
+                extra_body: None, // Remove extra_body for OpenAI compatibility
+            })?
         };
+
+        // Determine endpoint based on base URL (Ollama vs OpenAI compatible)
+        let endpoint = if self.config.small_model.base_url.contains("11434") {
+            format!("{}/api/chat", self.config.small_model.base_url)
+        } else {
+            format!("{}/chat/completions", self.config.small_model.base_url)
+        };
+        
+        let mut request_builder = self.client
+            .post(endpoint)
+            .header("Content-Type", "application/json")
+            .json(&request_body);
+
+        // Only add Authorization header if API key is not "none" (for local services like Ollama)
+        if self.config.small_model.api_key != "none" {
+            request_builder = request_builder.header(
+                "Authorization",
+                format!("Bearer {}", self.config.small_model.api_key),
+            );
+        }
 
         let response = timeout(
             Duration::from_secs(self.config.small_model_timeout_secs),
-            self.client
-                .post(format!(
-                    "{}/chat/completions",
-                    self.config.small_model.base_url
-                ))
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", self.config.small_model.api_key),
-                )
-                .header("Content-Type", "application/json")
-                .json(&request_body)
-                .send(),
+            request_builder.send(),
         )
         .await
         .context("Small model request timeout")?
@@ -274,19 +316,31 @@ impl LoroService {
             ));
         }
 
-        let openai_response: OpenAIResponse = response
-            .json()
-            .await
-            .context("Failed to parse small model response")?;
+        // Parse response based on API provider
+        let response_content = if self.config.small_model.base_url.contains("11434") {
+            // Ollama response format
+            let ollama_response: OllamaResponse = response
+                .json()
+                .await
+                .context("Failed to parse Ollama response")?;
+            ollama_response.message.content
+        } else {
+            // OpenAI response format  
+            let openai_response: OpenAIResponse = response
+                .json()
+                .await
+                .context("Failed to parse small model response")?;
 
-        let content = openai_response
-            .choices
-            .first()
-            .and_then(|choice| choice.message.as_ref())
-            .and_then(|msg| msg.content.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("No content in small model response"))?;
+            openai_response
+                .choices
+                .first()
+                .and_then(|choice| choice.message.as_ref())
+                .and_then(|msg| msg.content.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("No content in small model response"))?
+                .to_string()
+        };
 
-        Ok(content.trim().to_string())
+        Ok(response_content.trim().to_string())
     }
 
     fn is_appropriate_quick_response(&self, text: &str) -> bool {
@@ -305,7 +359,7 @@ impl LoroService {
     async fn get_large_model_stream(
         &self,
         request: ChatCompletionRequest,
-        prefix: Option<String>,
+        _prefix: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         // Enhance messages with voice assistant context - pre-allocate for performance
         let mut enhanced_messages = Vec::with_capacity(request.messages.len() + 1);
@@ -321,11 +375,6 @@ impl LoroService {
             ]));
         }
 
-        let mut extra_body = json!({"enable_thinking": false});
-        if let Some(ref prefix) = prefix {
-            extra_body["prefix"] = json!(prefix);
-        }
-
         let request_body = OpenAIRequest {
             model: self.config.large_model.model_name.clone(),
             messages: enhanced_messages,
@@ -336,21 +385,27 @@ impl LoroService {
             presence_penalty: None,
             stop: request.stop.clone(),
             stream: true,
-            extra_body: Some(extra_body),
+            extra_body: None, // Remove extra_body for OpenAI compatibility
         };
 
-        let response = self
+        let mut request_builder = self
             .client
             .post(format!(
                 "{}/chat/completions",
                 self.config.large_model.base_url
             ))
-            .header(
+            .header("Content-Type", "application/json")
+            .json(&request_body);
+
+        // Only add Authorization header if API key is not "none" (for local services like Ollama)
+        if self.config.large_model.api_key != "none" {
+            request_builder = request_builder.header(
                 "Authorization",
                 format!("Bearer {}", self.config.large_model.api_key),
-            )
-            .header("Content-Type", "application/json")
-            .json(&request_body)
+            );
+        }
+
+        let response = request_builder
             .send()
             .await
             .context("Failed to send large model request")?;
