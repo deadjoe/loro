@@ -25,6 +25,12 @@ Thumbs.db
 # Test artifacts
 /tests/test_results/
 
+# Coverage artifacts (do not track)
+/coverage/
+/tarpaulin-report.html
+/cobertura.xml
+*.lcov
+
 # Backup files
 *.bak
 *.tmp
