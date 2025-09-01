@@ -22,7 +22,8 @@ const ASSISTANT_ROLE: &str = "assistant";
 const CHUNK_OBJECT: &str = "chat.completion.chunk";
 const STOP_REASON: &str = "stop";
 const QUICK_SYSTEM_PROMPT: &str = "/no_think 你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。";
-const LARGE_SYSTEM_PROMPT: &str = "你是一个友好的AI语音助手，用自然对话的方式回应用户。回答要简洁明了，适合语音交互。";
+const LARGE_SYSTEM_PROMPT: &str =
+    "你是一个友好的AI语音助手，用自然对话的方式回应用户。回答要简洁明了，适合语音交互。";
 
 pub struct LoroService {
     config: Config,
@@ -257,14 +258,10 @@ impl LoroService {
         }
 
         // Use module-level constants to reduce allocations
-        
+
         let prompt_messages = vec![
-            HashMap::from([
-                (SYSTEM_ROLE.to_string(), QUICK_SYSTEM_PROMPT.to_string()),
-            ]),
-            HashMap::from([
-                (USER_ROLE.to_string(), last_message.content.clone()),
-            ]),
+            HashMap::from([(SYSTEM_ROLE.to_string(), QUICK_SYSTEM_PROMPT.to_string())]),
+            HashMap::from([(USER_ROLE.to_string(), last_message.content.clone())]),
         ];
 
         // Create request body appropriate for the target service
@@ -332,27 +329,27 @@ impl LoroService {
         }
 
         // Apply retry mechanism for small model calls
-        let request_builder_clone = request_builder.try_clone()
+        let request_builder_clone = request_builder
+            .try_clone()
             .ok_or_else(|| anyhow::anyhow!("Failed to clone request builder"))?;
         let timeout_duration = Duration::from_secs(self.config.small_model_timeout_secs);
-        
+
         let response = execute_with_retry(
             move || {
                 let builder = match request_builder_clone.try_clone() {
                     Some(b) => b,
-                    None => return Box::pin(async { 
-                        Err(anyhow::anyhow!("Failed to clone request builder in retry")) 
-                    }),
+                    None => {
+                        return Box::pin(async {
+                            Err(anyhow::anyhow!("Failed to clone request builder in retry"))
+                        })
+                    }
                 };
                 let timeout_dur = timeout_duration;
                 Box::pin(async move {
-                    timeout(
-                        timeout_dur,
-                        builder.send(),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Request timeout: {}", e))?
-                    .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))
+                    timeout(timeout_dur, builder.send())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Request timeout: {}", e))?
+                        .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))
                 })
             },
             self.config.max_retries,
@@ -418,14 +415,15 @@ impl LoroService {
         // Enhance messages with voice assistant context - pre-allocate for performance
         let mut enhanced_messages = Vec::with_capacity(request.messages.len() + 1);
         // Use module-level constants for common strings
-        
-        enhanced_messages.push(HashMap::from([
-            (SYSTEM_ROLE.to_string(), LARGE_SYSTEM_PROMPT.to_string()),
-        ]));
+
+        enhanced_messages.push(HashMap::from([(
+            SYSTEM_ROLE.to_string(),
+            LARGE_SYSTEM_PROMPT.to_string(),
+        )]));
 
         // Pre-allocate capacity to avoid reallocations
         enhanced_messages.reserve(request.messages.len() + 1);
-        
+
         for msg in &request.messages {
             enhanced_messages.push(HashMap::from([
                 (SYSTEM_ROLE.to_string(), msg.role.clone()),
@@ -464,15 +462,18 @@ impl LoroService {
         }
 
         // Apply retry mechanism for large model calls
-        let request_builder_clone = request_builder.try_clone()
+        let request_builder_clone = request_builder
+            .try_clone()
             .ok_or_else(|| anyhow::anyhow!("Failed to clone request builder"))?;
         let response = execute_with_retry(
             move || {
                 let builder = match request_builder_clone.try_clone() {
                     Some(b) => b,
-                    None => return Box::pin(async { 
-                        Err(anyhow::anyhow!("Failed to clone request builder in retry")) 
-                    }),
+                    None => {
+                        return Box::pin(async {
+                            Err(anyhow::anyhow!("Failed to clone request builder in retry"))
+                        })
+                    }
                 };
                 Box::pin(async move {
                     builder
@@ -506,7 +507,7 @@ impl LoroService {
             .map(move |chunk_result| {
                 let request_id = request_id.clone();
                 let model_name = model_name.clone();
-                
+
                 match chunk_result {
                     Ok(bytes) => {
                         let data = String::from_utf8_lossy(&bytes);
@@ -516,7 +517,8 @@ impl LoroService {
                         for line in data.lines() {
                             let line = line.trim();
                             if !line.is_empty() {
-                                match Self::process_sse_line_static(line, &request_id, &model_name) {
+                                match Self::process_sse_line_static(line, &request_id, &model_name)
+                                {
                                     Ok(Some(chunk)) => results.push(Ok(chunk)),
                                     Ok(None) => {} // Skip empty chunks
                                     Err(e) => {
@@ -726,7 +728,7 @@ where
 {
     let mut attempt = 0;
     let mut last_error = None;
-    
+
     while attempt <= max_retries {
         attempt += 1;
         match operation().await {
@@ -742,16 +744,24 @@ where
                     let delay = Duration::from_millis((100 * attempt.pow(2)) as u64); // Exponential backoff
                     warn!(
                         "{} attempt {} failed, retrying in {:?}: {}",
-                        operation_name, attempt, delay, last_error.as_ref().unwrap()
+                        operation_name,
+                        attempt,
+                        delay,
+                        last_error.as_ref().unwrap()
                     );
                     tokio::time::sleep(delay).await;
                 } else {
-                    error!("{} failed after {} attempts: {}", operation_name, max_retries, last_error.as_ref().unwrap());
+                    error!(
+                        "{} failed after {} attempts: {}",
+                        operation_name,
+                        max_retries,
+                        last_error.as_ref().unwrap()
+                    );
                 }
             }
         }
     }
-    
+
     Err(anyhow::anyhow!(
         "{} failed after {} retries: {}",
         operation_name,
