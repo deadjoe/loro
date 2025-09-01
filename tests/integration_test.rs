@@ -2,8 +2,10 @@ use loro::{
     config::Config, errors::LoroError, models::*, service::LoroService, stats::StatsCollector,
 };
 use secrecy::Secret;
+use serial_test::serial;
 
 #[tokio::test]
+#[serial]
 async fn test_service_initialization() {
     // Set test environment variables
     std::env::set_var("SMALL_MODEL_API_KEY", "test-key");
@@ -140,6 +142,7 @@ mod mock_tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_config_validation() {
         use loro::config::Config;
 
@@ -372,6 +375,7 @@ mod mock_tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_concurrent_request_handling() {
         // Clear potentially interfering environment variables first
         let vars_to_clear = [
@@ -604,6 +608,7 @@ mod mock_tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_config_timeout_validation() {
         std::env::set_var("SMALL_MODEL_API_KEY", "test-key");
         std::env::set_var("LARGE_MODEL_API_KEY", "test-key");

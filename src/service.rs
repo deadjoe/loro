@@ -1,4 +1,4 @@
-use crate::{config::Config, models::*, stats::StatsCollector};
+use crate::{config::Config, models::*, stats::StatsCollector, errors::LoroError};
 use secrecy::ExposeSecret;
 use anyhow::{Context, Result};
 use axum::response::{IntoResponse, Response, Sse};
@@ -78,7 +78,8 @@ impl LoroService {
             Ok(data) => Ok::<_, anyhow::Error>(axum::response::sse::Event::default().data(data)),
             Err(e) => {
                 error!("Stream error: {}", e);
-                Ok(axum::response::sse::Event::default().data(format!("data: [ERROR: {e}]\n\n")))
+                // 仅输出负载，由 axum SSE 封装 data: 前缀
+                Ok(axum::response::sse::Event::default().data(format!("[ERROR: {}]", e)))
             }
         });
 
@@ -122,26 +123,13 @@ impl LoroService {
             }],
         };
 
-        // Optimize string formatting for better performance with safety checks
-        let json_str = serde_json::to_string(&first_chunk)?;
-        // Check for reasonable size limits to prevent memory issues
-        if json_str.len() > 1024 * 1024 {
-            // 1MB limit per chunk
+        // 构造 JSON 负载（不包含 SSE data: 前缀）
+        let first_chunk_data = serde_json::to_string(&first_chunk)?;
+        if first_chunk_data.len() > 1024 * 1024 {
             return Err(anyhow::anyhow!(
                 "Response chunk too large: {} bytes",
-                json_str.len()
+                first_chunk_data.len()
             ));
-        }
-
-        let required_capacity = json_str.len().saturating_add(8); // "data: " + "\n\n"
-        let mut first_chunk_data = String::with_capacity(required_capacity);
-        first_chunk_data.push_str("data: ");
-        first_chunk_data.push_str(&json_str);
-        first_chunk_data.push_str("\n\n");
-
-        // Verify final size is within reasonable bounds
-        if first_chunk_data.len() > 1024 * 1024 + 8 {
-            return Err(anyhow::anyhow!("Formatted chunk exceeds size limit"));
         }
 
         // Step 2: Get large model stream with prefix
@@ -151,31 +139,23 @@ impl LoroService {
             .await?;
 
         let stats = Arc::clone(&self.quick_stats);
-        let enhanced_stream = large_stream.enumerate().map(move |(i, chunk_result)| {
-            match chunk_result {
-                Ok(chunk_data) => {
-                    if i == 0 {
-                        // First chunk from large model - record stats
-                        let large_time = large_start.elapsed().as_secs_f64();
-                        let total_time = request_start.elapsed().as_secs_f64();
+        let enhanced_stream = large_stream.map(|chunk_result| chunk_result);
 
-                        stats.add_request(
-                            quick_time,
-                            total_time,
-                            Some(quick_time),
-                            Some(large_time),
-                        );
-                    }
-                    Ok(chunk_data)
-                }
-                Err(e) => Err(e),
+        // 结束时记录统计并发送 [DONE]
+        let end_event = {
+            let stats = Arc::clone(&stats);
+            async move {
+                let total_time = request_start.elapsed().as_secs_f64();
+                let large_time = large_start.elapsed().as_secs_f64();
+                stats.add_request(quick_time, total_time, Some(quick_time), Some(large_time));
+                Ok("[DONE]".to_string())
             }
-        });
+        };
 
         // Combine quick response and large model stream
         let combined_stream = stream::once(async move { Ok(first_chunk_data) })
             .chain(enhanced_stream)
-            .chain(stream::once(async { Ok("data: [DONE]\n\n".to_string()) }));
+            .chain(stream::once(end_event));
 
         Ok(Box::pin(combined_stream))
     }
@@ -188,20 +168,14 @@ impl LoroService {
         let large_stream = self.get_large_model_stream(request, None).await?;
 
         let stats = Arc::clone(&self.direct_stats);
+        let first_time = Arc::new(std::sync::Mutex::new(None::<f64>));
+        let first_time_clone = Arc::clone(&first_time);
         let enhanced_stream = large_stream.enumerate().map(move |(i, chunk_result)| {
             match chunk_result {
                 Ok(chunk_data) => {
                     if i == 0 {
-                        // First chunk
-                        let first_response_time = request_start.elapsed().as_secs_f64();
-                        let total_time = first_response_time; // Same for direct mode
-
-                        stats.add_request(
-                            first_response_time,
-                            total_time,
-                            None,
-                            Some(first_response_time),
-                        );
+                        let mut guard = first_time_clone.lock().unwrap();
+                        *guard = Some(request_start.elapsed().as_secs_f64());
                     }
                     Ok(chunk_data)
                 }
@@ -209,8 +183,18 @@ impl LoroService {
             }
         });
 
-        let final_stream =
-            enhanced_stream.chain(stream::once(async { Ok("data: [DONE]\n\n".to_string()) }));
+        let end_event = {
+            let stats = Arc::clone(&stats);
+            let first_time = Arc::clone(&first_time);
+            async move {
+                let total_time = request_start.elapsed().as_secs_f64();
+                let first = first_time.lock().unwrap().unwrap_or(total_time);
+                stats.add_request(first, total_time, None, Some(total_time));
+                Ok("[DONE]".to_string())
+            }
+        };
+
+        let final_stream = enhanced_stream.chain(stream::once(end_event));
 
         Ok(Box::pin(final_stream))
     }
@@ -349,8 +333,11 @@ impl LoroService {
                 Box::pin(async move {
                     timeout(timeout_dur, builder.send())
                         .await
-                        .map_err(|e| anyhow::anyhow!("Request timeout: {}", e))?
-                        .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))
+                        .map_err(|_e| {
+                            // 转为类型化超时错误
+                            anyhow::Error::from(LoroError::Timeout { timeout_secs: timeout_dur.as_secs() })
+                        })?
+                        .map_err(|e| anyhow::Error::from(LoroError::HttpClient(e)))
                 })
             },
             self.config.max_retries,
@@ -361,11 +348,11 @@ impl LoroService {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Small model API error {}: {}",
-                status,
-                error_text
-            ));
+            return Err(anyhow::Error::from(LoroError::ApiError {
+                provider: "small".to_string(),
+                status: status.as_u16(),
+                message: error_text,
+            }));
         }
 
         // Parse response based on API provider
@@ -397,7 +384,7 @@ impl LoroService {
 
     fn is_appropriate_quick_response(&self, text: &str) -> bool {
         // Should be short and conversational
-        if text.len() > 6 {
+        if text.chars().count() > 6 {
             return false;
         }
         // Should not contain complex sentences
@@ -432,30 +419,47 @@ impl LoroService {
             ]));
         }
 
-        let request_body = OpenAIRequest {
-            model: self.config.large_model.model_name.clone(),
-            messages: enhanced_messages,
-            max_tokens: request.max_tokens.or(Some(150)),
-            temperature: Some(request.temperature),
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            stop: request.stop.clone(),
-            stream: true,
-            extra_body: None, // Remove extra_body for OpenAI compatibility
+        let is_ollama = self.config.large_model.base_url.contains("11434");
+
+        // Build request body and endpoint depending on provider
+        let (endpoint, body_value, add_auth) = if is_ollama {
+            let mut msgs: Vec<serde_json::Value> = Vec::with_capacity(request.messages.len() + 1);
+            msgs.push(json!({"role": SYSTEM_ROLE, "content": LARGE_SYSTEM_PROMPT}));
+            for m in &request.messages {
+                msgs.push(json!({"role": m.role, "content": m.content}));
+            }
+            let body = json!({
+                "model": self.config.large_model.model_name,
+                "messages": msgs,
+                "stream": true,
+                "keep_alive": "10m"
+            });
+            (format!("{}/api/chat", self.config.large_model.base_url), body, false)
+        } else {
+            let request_body = OpenAIRequest {
+                model: self.config.large_model.model_name.clone(),
+                messages: enhanced_messages,
+                max_tokens: request.max_tokens.or(Some(150)),
+                temperature: Some(request.temperature),
+                top_p: None,
+                frequency_penalty: None,
+                presence_penalty: None,
+                stop: request.stop.clone(),
+                stream: true,
+                extra_body: _prefix.map(|p| json!({"prefix": p})),
+            };
+            (
+                format!("{}/chat/completions", self.config.large_model.base_url),
+                serde_json::to_value(request_body)?,
+                true,
+            )
         };
 
-        let mut request_builder = self
-            .client
-            .post(format!(
-                "{}/chat/completions",
-                self.config.large_model.base_url
-            ))
+        let mut request_builder = self.client.post(endpoint)
             .header("Content-Type", "application/json")
-            .json(&request_body);
+            .json(&body_value);
 
-        // Only add Authorization header if API key is not "none" (for local services like Ollama)
-        if self.config.large_model.api_key.expose_secret() != "none" {
+        if add_auth && self.config.large_model.api_key.expose_secret() != "none" {
             request_builder = request_builder.header(
                 "Authorization",
                 format!("Bearer {}", self.config.large_model.api_key.expose_secret()),
@@ -480,7 +484,7 @@ impl LoroService {
                     builder
                         .send()
                         .await
-                        .map_err(|e| anyhow::anyhow!("Failed to send large model request: {}", e))
+                        .map_err(|e| anyhow::Error::from(LoroError::HttpClient(e)))
                 })
             },
             self.config.max_retries,
@@ -502,13 +506,14 @@ impl LoroService {
         let request_id = Uuid::new_v4().to_string();
         let model_name = request.model.clone();
 
-        // Process SSE stream with proper buffering for incomplete chunks
+        // Process upstream stream with buffering for incomplete chunks (SSE or Ollama JSON lines)
         let buffer = Arc::new(std::sync::Mutex::new(String::new()));
         let stream = byte_stream
             .map(move |chunk_result| {
                 let request_id = request_id.clone();
                 let model_name = model_name.clone();
                 let buffer = Arc::clone(&buffer);
+                let is_ollama = is_ollama;
 
                 match chunk_result {
                     Ok(bytes) => {
@@ -532,19 +537,31 @@ impl LoroService {
                         for line in buffer_guard.lines() {
                             let line = line.trim();
                             if !line.is_empty() {
-                                // Check if this looks like a complete SSE line
-                                if line.starts_with("data: ") || line == "[DONE]" {
-                                    match Self::process_sse_line_static(line, &request_id, &model_name) {
+                                if is_ollama {
+                                    // Ollama streaming: each line is a standalone JSON object
+                                    match Self::process_ollama_line_static(line, &request_id, &model_name) {
                                         Ok(Some(chunk)) => results.push(Ok(chunk)),
-                                        Ok(None) => {} // Skip empty chunks
-                                        Err(e) => {
-                                            warn!("SSE parsing error: {}", e);
-                                            // Continue processing instead of failing the entire stream
+                                        Ok(None) => {}
+                                        Err(_e) => {
+                                            // Likely incomplete JSON, keep for next chunk
+                                            remaining_data = line.to_string();
                                         }
                                     }
                                 } else {
-                                    // This might be an incomplete line, keep it for next chunk
-                                    remaining_data = line.to_string();
+                                    // SSE 格式：形如 data: {...}
+                                    if line.starts_with("data: ") || line == "[DONE]" {
+                                        match Self::process_sse_line_static(line, &request_id, &model_name) {
+                                            Ok(Some(chunk)) => results.push(Ok(chunk)),
+                                            Ok(None) => {}
+                                            Err(_e) => {
+                                                // 可能是半行，保留
+                                                remaining_data = line.to_string();
+                                            }
+                                        }
+                                    } else {
+                                        // 不完整行，保留
+                                        remaining_data = line.to_string();
+                                    }
                                 }
                             }
                         }
@@ -572,18 +589,12 @@ impl LoroService {
                         };
 
                         if let Ok(json_str) = serde_json::to_string(&error_chunk) {
-                            // Check size limits for error chunks too
                             if json_str.len() > 1024 * 1024 {
                                 futures::stream::iter(vec![Err(anyhow::anyhow!(
                                     "Error chunk too large"
                                 ))])
                             } else {
-                                let required_capacity = json_str.len().saturating_add(8);
-                                let mut error_data = String::with_capacity(required_capacity);
-                                error_data.push_str("data: ");
-                                error_data.push_str(&json_str);
-                                error_data.push_str("\n\n");
-                                futures::stream::iter(vec![Ok(error_data)])
+                                futures::stream::iter(vec![Ok(json_str)])
                             }
                         } else {
                             futures::stream::iter(vec![Err(anyhow::anyhow!("Stream error: {}", e))])
@@ -596,6 +607,32 @@ impl LoroService {
         Ok(Box::pin(stream))
     }
 
+    pub fn process_ollama_line_static(
+        line: &str,
+        request_id: &str,
+        model_name: &str,
+    ) -> Result<Option<String>> {
+        // 每一行应为一个 JSON 对象
+        let resp: crate::models::OllamaResponse = serde_json::from_str(line)?;
+        let content = resp.message.content;
+        if content.is_empty() {
+            return Ok(None);
+        }
+        let chunk = ChatCompletionChunk {
+            id: format!("chatcmpl-{}", request_id),
+            object: CHUNK_OBJECT.to_string(),
+            created: chrono::Utc::now().timestamp(),
+            model: model_name.to_string(),
+            choices: vec![ChoiceDelta {
+                index: 0,
+                delta: MessageDelta { role: None, content: Some(content) },
+                finish_reason: None,
+            }],
+        };
+        let json_str = serde_json::to_string(&chunk)?;
+        if json_str.len() > 1024 * 1024 { return Ok(None); }
+        Ok(Some(json_str))
+    }
     pub fn process_sse_line_static(
         line: &str,
         request_id: &str,
@@ -653,16 +690,10 @@ impl LoroService {
                                 };
 
                                 let json_str = serde_json::to_string(&chunk)?;
-                                // Check size limits for all chunks
                                 if json_str.len() > 1024 * 1024 {
-                                    return Ok(None); // Skip oversized chunks
+                                    return Ok(None);
                                 }
-                                // Use manual string building for better performance
-                                let mut chunk_data = String::with_capacity(json_str.len() + 8);
-                                chunk_data.push_str("data: ");
-                                chunk_data.push_str(&json_str);
-                                chunk_data.push_str("\n\n");
-                                return Ok(Some(chunk_data));
+                                return Ok(Some(json_str));
                             }
                         }
 
@@ -685,16 +716,10 @@ impl LoroService {
 
                             // Optimize string formatting with safety checks
                             let json_str = serde_json::to_string(&chunk)?;
-                            // Check size limits for finish chunks too
                             if json_str.len() > 1024 * 1024 {
-                                return Ok(None); // Skip oversized chunks
+                                return Ok(None);
                             }
-                            let required_capacity = json_str.len().saturating_add(8);
-                            let mut chunk_data = String::with_capacity(required_capacity);
-                            chunk_data.push_str("data: ");
-                            chunk_data.push_str(&json_str);
-                            chunk_data.push_str("\n\n");
-                            return Ok(Some(chunk_data));
+                            return Ok(Some(json_str));
                         }
                     }
                 }
@@ -741,17 +766,16 @@ impl LoroService {
 }
 
 // Retry helper function
-async fn execute_with_retry<F, T, E>(
+async fn execute_with_retry<F, T>(
     mut operation: F,
     max_retries: u32,
     operation_name: &str,
 ) -> Result<T>
 where
-    F: FnMut() -> futures::future::BoxFuture<'static, Result<T, E>>,
-    E: std::fmt::Display,
+    F: FnMut() -> futures::future::BoxFuture<'static, Result<T>>,
 {
     let mut attempt = 0;
-    let mut last_error = None;
+    let mut last_error: Option<anyhow::Error> = None;
 
     while attempt <= max_retries {
         attempt += 1;
@@ -765,7 +789,7 @@ where
             Err(e) => {
                 last_error = Some(e);
                 if attempt <= max_retries {
-                    let delay = Duration::from_millis((100 * attempt.pow(2)) as u64); // Exponential backoff
+                    let delay = Duration::from_millis((100 * attempt.pow(2)) as u64);
                     warn!(
                         "{} attempt {} failed, retrying in {:?}: {}",
                         operation_name,
@@ -786,10 +810,5 @@ where
         }
     }
 
-    Err(anyhow::anyhow!(
-        "{} failed after {} retries: {}",
-        operation_name,
-        max_retries,
-        last_error.unwrap()
-    ))
+    Err(last_error.unwrap())
 }

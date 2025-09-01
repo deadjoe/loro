@@ -73,9 +73,6 @@ impl<'de> Deserialize<'de> for ModelConfig {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        // Load .env file if it exists
-        dotenvy::dotenv().ok();
-
         let small_model = ModelConfig {
             api_key: Secret::new(env::var("SMALL_MODEL_API_KEY")
                 .context("SMALL_MODEL_API_KEY environment variable is required")?),
@@ -188,6 +185,7 @@ impl Config {
 mod tests {
     use super::*;
     use std::env;
+    use serial_test::serial;
 
     #[test]
     fn test_config_validation() {
@@ -239,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_explicit_values() {
         // Test that the from_env function works with explicit environment variables
         // Set required env vars
