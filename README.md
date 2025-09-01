@@ -281,7 +281,7 @@ loro/
 
 3. **Debugging**:
    ```bash
-   RUST_LOG=debug cargo run          # Verbose logging
+   LOG_LEVEL=debug cargo run         # Verbose logging (unified)
    RUST_BACKTRACE=1 cargo run        # Stack traces
    ```
 
@@ -307,7 +307,7 @@ To integrate additional AI model providers:
 
 ### Production Considerations
 
-- **Environment**: Set `RUST_LOG=info` for production logging
+- **Environment**: Set `LOG_LEVEL=info` for production logging (unified)
 - **Resources**: Allocate sufficient memory for model responses
 - **Monitoring**: Set up external monitoring for `/health` endpoint
 - **Security**: Configure proper firewall rules and TLS termination
