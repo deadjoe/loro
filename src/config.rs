@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use secrecy::{Secret, ExposeSecret};
 use serde::{Deserialize, Serialize};
 use std::env;
 
@@ -15,11 +16,59 @@ pub struct Config {
     pub stats_max_entries: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct ModelConfig {
-    pub api_key: String,
+    pub api_key: Secret<String>,
     pub base_url: String,
     pub model_name: String,
+}
+
+// Custom Debug implementation to hide API keys
+impl std::fmt::Debug for ModelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("model_name", &self.model_name)
+            .finish()
+    }
+}
+
+// Custom Serialize implementation that excludes secrets
+impl Serialize for ModelConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ModelConfig", 3)?;
+        state.serialize_field("api_key", "[REDACTED]")?;
+        state.serialize_field("base_url", &self.base_url)?;
+        state.serialize_field("model_name", &self.model_name)?;
+        state.end()
+    }
+}
+
+// Custom Deserialize implementation (for completeness, though not used in practice)
+impl<'de> Deserialize<'de> for ModelConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct ModelConfigHelper {
+            api_key: String,
+            base_url: String,
+            model_name: String,
+        }
+        
+        let helper = ModelConfigHelper::deserialize(deserializer)?;
+        Ok(ModelConfig {
+            api_key: Secret::new(helper.api_key),
+            base_url: helper.base_url,
+            model_name: helper.model_name,
+        })
+    }
 }
 
 impl Config {
@@ -28,8 +77,8 @@ impl Config {
         dotenvy::dotenv().ok();
 
         let small_model = ModelConfig {
-            api_key: env::var("SMALL_MODEL_API_KEY")
-                .context("SMALL_MODEL_API_KEY environment variable is required")?,
+            api_key: Secret::new(env::var("SMALL_MODEL_API_KEY")
+                .context("SMALL_MODEL_API_KEY environment variable is required")?),
             base_url: env::var("SMALL_MODEL_BASE_URL")
                 .unwrap_or_else(|_| "https://api.siliconflow.cn/v1".to_string()),
             model_name: env::var("SMALL_MODEL_NAME")
@@ -37,8 +86,8 @@ impl Config {
         };
 
         let large_model = ModelConfig {
-            api_key: env::var("LARGE_MODEL_API_KEY")
-                .context("LARGE_MODEL_API_KEY environment variable is required")?,
+            api_key: Secret::new(env::var("LARGE_MODEL_API_KEY")
+                .context("LARGE_MODEL_API_KEY environment variable is required")?),
             base_url: env::var("LARGE_MODEL_BASE_URL")
                 .unwrap_or_else(|_| "https://api.siliconflow.cn/v1".to_string()),
             model_name: env::var("LARGE_MODEL_NAME")
@@ -79,10 +128,10 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         // Validate API keys are not empty (allow "none" for local services like Ollama)
-        if self.small_model.api_key.trim().is_empty() {
+        if self.small_model.api_key.expose_secret().trim().is_empty() {
             return Err(anyhow::anyhow!("SMALL_MODEL_API_KEY cannot be empty"));
         }
-        if self.large_model.api_key.trim().is_empty() {
+        if self.large_model.api_key.expose_secret().trim().is_empty() {
             return Err(anyhow::anyhow!("LARGE_MODEL_API_KEY cannot be empty"));
         }
 
@@ -147,12 +196,12 @@ mod tests {
             port: 8000,
             log_level: "info".to_string(),
             small_model: ModelConfig {
-                api_key: "valid-key".to_string(),
+                api_key: Secret::new("valid-key".to_string()),
                 base_url: "https://api.example.com/v1".to_string(),
                 model_name: "test-model".to_string(),
             },
             large_model: ModelConfig {
-                api_key: "valid-key".to_string(),
+                api_key: Secret::new("valid-key".to_string()),
                 base_url: "https://api.example.com/v1".to_string(),
                 model_name: "test-model".to_string(),
             },
@@ -166,9 +215,9 @@ mod tests {
         assert!(config.validate().is_ok());
 
         // Test empty API key
-        config.small_model.api_key = "".to_string();
+        config.small_model.api_key = Secret::new("".to_string());
         assert!(config.validate().is_err());
-        config.small_model.api_key = "valid-key".to_string();
+        config.small_model.api_key = Secret::new("valid-key".to_string());
 
         // Test invalid URL
         config.large_model.base_url = "not-a-url".to_string();
@@ -212,7 +261,7 @@ mod tests {
         assert_eq!(config.small_model_timeout_secs, 10);
         assert_eq!(config.max_retries, 5);
         assert_eq!(config.stats_max_entries, 5000);
-        assert_eq!(config.small_model.api_key, "test-small-key");
-        assert_eq!(config.large_model.api_key, "test-large-key");
+        assert_eq!(config.small_model.api_key.expose_secret(), "test-small-key");
+        assert_eq!(config.large_model.api_key.expose_secret(), "test-large-key");
     }
 }

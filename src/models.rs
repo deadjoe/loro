@@ -168,22 +168,24 @@ pub struct OpenAIMessage {
     pub content: Option<String>,
 }
 
-// Ollama API response structures
+// Ollama API response structures  
 #[derive(Debug, Clone, Deserialize)]
 pub struct OllamaResponse {
-    #[allow(dead_code)]
-    pub model: String,
-    #[allow(dead_code)]
-    pub created_at: String,
+    // Fields required for deserialization but not used in logic
+    #[serde(rename = "model")]
+    _model: String,
+    #[serde(rename = "created_at")]
+    _created_at: String,
     pub message: OllamaMessage,
-    #[allow(dead_code)]
-    pub done: bool,
+    #[serde(rename = "done")]
+    _done: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OllamaMessage {
-    #[allow(dead_code)]
-    pub role: String,
+    // Role field required for deserialization but not used  
+    #[serde(rename = "role")]
+    _role: String,
     pub content: String,
 }
 
