@@ -15,6 +15,16 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+// Static constants to reduce string allocations
+const SYSTEM_ROLE: &str = "system";
+const USER_ROLE: &str = "user";
+const ASSISTANT_ROLE: &str = "assistant";
+const CHUNK_OBJECT: &str = "chat.completion.chunk";
+const STOP_REASON: &str = "stop";
+const QUICK_SYSTEM_PROMPT: &str = "/no_think 你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。";
+const LARGE_SYSTEM_PROMPT: &str =
+    "你是一个友好的AI语音助手，用自然对话的方式回应用户。回答要简洁明了，适合语音交互。";
+
 pub struct LoroService {
     config: Config,
     client: Client,
@@ -26,10 +36,12 @@ impl LoroService {
     pub async fn new(config: Config) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.http_timeout_secs))
-            .connect_timeout(Duration::from_secs(2))
-            .pool_max_idle_per_host(10)
-            .pool_idle_timeout(Duration::from_secs(30))
-            .no_proxy()  // Disable proxy for direct localhost connections
+            .connect_timeout(Duration::from_secs(5)) // Increased for better reliability
+            .pool_max_idle_per_host(20) // Increased for higher concurrency
+            .pool_idle_timeout(Duration::from_secs(60)) // Increased for connection reuse
+            .tcp_keepalive(Duration::from_secs(30)) // Added keepalive for better performance
+            .tcp_nodelay(true) // Disable Nagle's algorithm for lower latency
+            .no_proxy() // Disable proxy for direct localhost connections
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -96,29 +108,46 @@ impl LoroService {
         // Create first chunk with quick response
         let first_chunk = ChatCompletionChunk {
             id: format!("chatcmpl-{request_id}"),
-            object: "chat.completion.chunk".to_string(),
+            object: CHUNK_OBJECT.to_string(),
             created: chrono::Utc::now().timestamp(),
             model: model_name,
             choices: vec![ChoiceDelta {
                 index: 0,
                 delta: MessageDelta {
-                    role: Some("assistant".to_string()),
+                    role: Some(ASSISTANT_ROLE.to_string()),
                     content: Some(quick_response.clone()),
                 },
                 finish_reason: None,
             }],
         };
 
-        // Optimize string formatting for better performance
+        // Optimize string formatting for better performance with safety checks
         let json_str = serde_json::to_string(&first_chunk)?;
-        let mut first_chunk_data = String::with_capacity(json_str.len() + 8);
+        // Check for reasonable size limits to prevent memory issues
+        if json_str.len() > 1024 * 1024 {
+            // 1MB limit per chunk
+            return Err(anyhow::anyhow!(
+                "Response chunk too large: {} bytes",
+                json_str.len()
+            ));
+        }
+
+        let required_capacity = json_str.len().saturating_add(8); // "data: " + "\n\n"
+        let mut first_chunk_data = String::with_capacity(required_capacity);
         first_chunk_data.push_str("data: ");
         first_chunk_data.push_str(&json_str);
         first_chunk_data.push_str("\n\n");
 
+        // Verify final size is within reasonable bounds
+        if first_chunk_data.len() > 1024 * 1024 + 8 {
+            return Err(anyhow::anyhow!("Formatted chunk exceeds size limit"));
+        }
+
         // Step 2: Get large model stream with prefix
         let large_start = Instant::now();
-        let large_stream = self.get_large_model_stream(request, Some(quick_response)).await?;
+        let large_stream = self
+            .get_large_model_stream(request, Some(quick_response))
+            .await?;
 
         let stats = Arc::clone(&self.quick_stats);
         let enhanced_stream = large_stream.enumerate().map(move |(i, chunk_result)| {
@@ -204,12 +233,14 @@ impl LoroService {
         }
 
         // Fallback to predefined responses
-        let last_message = messages.last()
+        let last_message = messages
+            .last()
             .expect("Messages array should not be empty (already checked)");
         let category = last_message.categorize();
         let responses = category.get_responses();
         let mut rng = rand::thread_rng();
-        let response = responses.choose(&mut rng)
+        let response = responses
+            .choose(&mut rng)
             .expect("Predefined responses array should never be empty");
         Ok(response.to_string())
     }
@@ -219,35 +250,33 @@ impl LoroService {
             return Err(anyhow::anyhow!("Messages array cannot be empty"));
         }
 
-        let last_message = messages.last()
+        let last_message = messages
+            .last()
             .expect("Messages array should not be empty (already checked)");
         if last_message.content.trim().is_empty() {
             return Err(anyhow::anyhow!("Message content cannot be empty"));
         }
 
+        // Use module-level constants to reduce allocations
+
         let prompt_messages = vec![
-            HashMap::from([
-                ("role".to_string(), "system".to_string()),
-                ("content".to_string(), "/no_think 你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。".to_string()),
-            ]),
-            HashMap::from([
-                ("role".to_string(), "user".to_string()),
-                ("content".to_string(), last_message.content.clone()),
-            ]),
+            HashMap::from([(SYSTEM_ROLE.to_string(), QUICK_SYSTEM_PROMPT.to_string())]),
+            HashMap::from([(USER_ROLE.to_string(), last_message.content.clone())]),
         ];
 
         // Create request body appropriate for the target service
         let request_body = if self.config.small_model.base_url.contains("11434") {
             // Ollama-compatible request
+            // Reuse constants to avoid string allocations
             let ollama_messages = vec![
                 json!({
-                    "role": "system",
-                    "content": "/no_think 你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。"
+                    "role": SYSTEM_ROLE,
+                    "content": QUICK_SYSTEM_PROMPT
                 }),
                 json!({
-                    "role": "user", 
-                    "content": last_message.content.clone()
-                })
+                    "role": USER_ROLE,
+                    "content": last_message.content
+                }),
             ];
             json!({
                 "model": self.config.small_model.model_name,
@@ -284,8 +313,9 @@ impl LoroService {
         } else {
             format!("{}/chat/completions", self.config.small_model.base_url)
         };
-        
-        let mut request_builder = self.client
+
+        let mut request_builder = self
+            .client
             .post(endpoint)
             .header("Content-Type", "application/json")
             .json(&request_body);
@@ -298,13 +328,34 @@ impl LoroService {
             );
         }
 
-        let response = timeout(
-            Duration::from_secs(self.config.small_model_timeout_secs),
-            request_builder.send(),
+        // Apply retry mechanism for small model calls
+        let request_builder_clone = request_builder
+            .try_clone()
+            .ok_or_else(|| anyhow::anyhow!("Failed to clone request builder"))?;
+        let timeout_duration = Duration::from_secs(self.config.small_model_timeout_secs);
+
+        let response = execute_with_retry(
+            move || {
+                let builder = match request_builder_clone.try_clone() {
+                    Some(b) => b,
+                    None => {
+                        return Box::pin(async {
+                            Err(anyhow::anyhow!("Failed to clone request builder in retry"))
+                        })
+                    }
+                };
+                let timeout_dur = timeout_duration;
+                Box::pin(async move {
+                    timeout(timeout_dur, builder.send())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Request timeout: {}", e))?
+                        .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))
+                })
+            },
+            self.config.max_retries,
+            "small_model_request",
         )
-        .await
-        .context("Small model request timeout")?
-        .context("Failed to send small model request")?;
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -325,7 +376,7 @@ impl LoroService {
                 .context("Failed to parse Ollama response")?;
             ollama_response.message.content
         } else {
-            // OpenAI response format  
+            // OpenAI response format
             let openai_response: OpenAIResponse = response
                 .json()
                 .await
@@ -363,15 +414,20 @@ impl LoroService {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         // Enhance messages with voice assistant context - pre-allocate for performance
         let mut enhanced_messages = Vec::with_capacity(request.messages.len() + 1);
-        enhanced_messages.push(HashMap::from([
-            ("role".to_string(), "system".to_string()),
-            ("content".to_string(), "你是一个友好的AI语音助手，用自然对话的方式回应用户。回答要简洁明了，适合语音交互。".to_string()),
-        ]));
+        // Use module-level constants for common strings
+
+        enhanced_messages.push(HashMap::from([(
+            SYSTEM_ROLE.to_string(),
+            LARGE_SYSTEM_PROMPT.to_string(),
+        )]));
+
+        // Pre-allocate capacity to avoid reallocations
+        enhanced_messages.reserve(request.messages.len() + 1);
 
         for msg in &request.messages {
             enhanced_messages.push(HashMap::from([
-                ("role".to_string(), msg.role.clone()),
-                ("content".to_string(), msg.content.clone()),
+                (SYSTEM_ROLE.to_string(), msg.role.clone()),
+                (USER_ROLE.to_string(), msg.content.clone()),
             ]));
         }
 
@@ -405,10 +461,31 @@ impl LoroService {
             );
         }
 
-        let response = request_builder
-            .send()
-            .await
-            .context("Failed to send large model request")?;
+        // Apply retry mechanism for large model calls
+        let request_builder_clone = request_builder
+            .try_clone()
+            .ok_or_else(|| anyhow::anyhow!("Failed to clone request builder"))?;
+        let response = execute_with_retry(
+            move || {
+                let builder = match request_builder_clone.try_clone() {
+                    Some(b) => b,
+                    None => {
+                        return Box::pin(async {
+                            Err(anyhow::anyhow!("Failed to clone request builder in retry"))
+                        })
+                    }
+                };
+                Box::pin(async move {
+                    builder
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to send large model request: {}", e))
+                })
+            },
+            self.config.max_retries,
+            "large_model_request",
+        )
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -427,52 +504,66 @@ impl LoroService {
         // Process SSE stream - handle each chunk individually for now
         // TODO: Implement proper buffering for incomplete SSE chunks
         let stream = byte_stream
-            .map(move |chunk_result| match chunk_result {
-                Ok(bytes) => {
-                    let data = String::from_utf8_lossy(&bytes);
-                    let mut results = Vec::new();
-                    
-                    // Process each line in the received chunk
-                    for line in data.lines() {
-                        let line = line.trim();
-                        if !line.is_empty() {
-                            match Self::process_sse_line_static(line, &request_id, &model_name) {
-                                Ok(Some(chunk)) => results.push(Ok(chunk)),
-                                Ok(None) => {} // Skip empty chunks
-                                Err(e) => {
-                                    warn!("SSE parsing error: {}", e);
-                                    // Continue processing instead of failing the entire stream
+            .map(move |chunk_result| {
+                let request_id = request_id.clone();
+                let model_name = model_name.clone();
+
+                match chunk_result {
+                    Ok(bytes) => {
+                        let data = String::from_utf8_lossy(&bytes);
+                        let mut results = Vec::new();
+
+                        // Process each line in the received chunk
+                        for line in data.lines() {
+                            let line = line.trim();
+                            if !line.is_empty() {
+                                match Self::process_sse_line_static(line, &request_id, &model_name)
+                                {
+                                    Ok(Some(chunk)) => results.push(Ok(chunk)),
+                                    Ok(None) => {} // Skip empty chunks
+                                    Err(e) => {
+                                        warn!("SSE parsing error: {}", e);
+                                        // Continue processing instead of failing the entire stream
+                                    }
                                 }
                             }
                         }
+                        futures::stream::iter(results)
                     }
-                    futures::stream::iter(results)
-                }
-                Err(e) => {
-                    // Create error chunk similar to Python version
-                    let error_chunk = ChatCompletionChunk {
-                        id: format!("chatcmpl-{request_id}"),
-                        object: "chat.completion.chunk".to_string(),
-                        created: chrono::Utc::now().timestamp(),
-                        model: model_name.clone(),
-                        choices: vec![ChoiceDelta {
-                            index: 0,
-                            delta: MessageDelta {
-                                role: None,
-                                content: Some(" [抱歉，出现了问题]".to_string()),
-                            },
-                            finish_reason: Some("stop".to_string()),
-                        }],
-                    };
-                    
-                    if let Ok(json_str) = serde_json::to_string(&error_chunk) {
-                        let mut error_data = String::with_capacity(json_str.len() + 8);
-                        error_data.push_str("data: ");
-                        error_data.push_str(&json_str);
-                        error_data.push_str("\n\n");
-                        futures::stream::iter(vec![Ok(error_data)])
-                    } else {
-                        futures::stream::iter(vec![Err(anyhow::anyhow!("Stream error: {}", e))])
+                    Err(e) => {
+                        // Create error chunk similar to Python version
+                        let error_chunk = ChatCompletionChunk {
+                            id: format!("chatcmpl-{request_id}"),
+                            object: CHUNK_OBJECT.to_string(),
+                            created: chrono::Utc::now().timestamp(),
+                            model: model_name.clone(),
+                            choices: vec![ChoiceDelta {
+                                index: 0,
+                                delta: MessageDelta {
+                                    role: None,
+                                    content: Some(" [抱歉，出现了问题]".to_string()),
+                                },
+                                finish_reason: Some(STOP_REASON.to_string()),
+                            }],
+                        };
+
+                        if let Ok(json_str) = serde_json::to_string(&error_chunk) {
+                            // Check size limits for error chunks too
+                            if json_str.len() > 1024 * 1024 {
+                                futures::stream::iter(vec![Err(anyhow::anyhow!(
+                                    "Error chunk too large"
+                                ))])
+                            } else {
+                                let required_capacity = json_str.len().saturating_add(8);
+                                let mut error_data = String::with_capacity(required_capacity);
+                                error_data.push_str("data: ");
+                                error_data.push_str(&json_str);
+                                error_data.push_str("\n\n");
+                                futures::stream::iter(vec![Ok(error_data)])
+                            }
+                        } else {
+                            futures::stream::iter(vec![Err(anyhow::anyhow!("Stream error: {}", e))])
+                        }
                     }
                 }
             })
@@ -504,9 +595,17 @@ impl LoroService {
                     if let Some(choice) = openai_chunk.choices.first() {
                         // Handle both message and delta fields for compatibility
                         let (content, role, finish_reason) = if let Some(delta) = &choice.delta {
-                            (delta.content.as_ref(), delta.role.as_ref(), choice.finish_reason.as_ref())
+                            (
+                                delta.content.as_ref(),
+                                delta.role.as_ref(),
+                                choice.finish_reason.as_ref(),
+                            )
                         } else if let Some(message) = &choice.message {
-                            (message.content.as_ref(), message.role.as_ref(), choice.finish_reason.as_ref())
+                            (
+                                message.content.as_ref(),
+                                message.role.as_ref(),
+                                choice.finish_reason.as_ref(),
+                            )
                         } else {
                             (None, None, choice.finish_reason.as_ref())
                         };
@@ -516,7 +615,7 @@ impl LoroService {
                             if !content.is_empty() {
                                 let chunk = ChatCompletionChunk {
                                     id: format!("chatcmpl-{request_id}"),
-                                    object: "chat.completion.chunk".to_string(),
+                                    object: CHUNK_OBJECT.to_string(),
                                     created: chrono::Utc::now().timestamp(),
                                     model: model_name.to_string(),
                                     choices: vec![ChoiceDelta {
@@ -529,17 +628,25 @@ impl LoroService {
                                     }],
                                 };
 
-                                let chunk_data =
-                                    format!("data: {}\n\n", serde_json::to_string(&chunk)?);
+                                let json_str = serde_json::to_string(&chunk)?;
+                                // Check size limits for all chunks
+                                if json_str.len() > 1024 * 1024 {
+                                    return Ok(None); // Skip oversized chunks
+                                }
+                                // Use manual string building for better performance
+                                let mut chunk_data = String::with_capacity(json_str.len() + 8);
+                                chunk_data.push_str("data: ");
+                                chunk_data.push_str(&json_str);
+                                chunk_data.push_str("\n\n");
                                 return Ok(Some(chunk_data));
                             }
                         }
-                        
+
                         // Handle finish_reason without content (end of stream)
                         if finish_reason.is_some() && content.is_none() {
                             let chunk = ChatCompletionChunk {
                                 id: format!("chatcmpl-{request_id}"),
-                                object: "chat.completion.chunk".to_string(),
+                                object: CHUNK_OBJECT.to_string(),
                                 created: chrono::Utc::now().timestamp(),
                                 model: model_name.to_string(),
                                 choices: vec![ChoiceDelta {
@@ -552,9 +659,14 @@ impl LoroService {
                                 }],
                             };
 
-                            // Optimize string formatting
+                            // Optimize string formatting with safety checks
                             let json_str = serde_json::to_string(&chunk)?;
-                            let mut chunk_data = String::with_capacity(json_str.len() + 8);
+                            // Check size limits for finish chunks too
+                            if json_str.len() > 1024 * 1024 {
+                                return Ok(None); // Skip oversized chunks
+                            }
+                            let required_capacity = json_str.len().saturating_add(8);
+                            let mut chunk_data = String::with_capacity(required_capacity);
                             chunk_data.push_str("data: ");
                             chunk_data.push_str(&json_str);
                             chunk_data.push_str("\n\n");
@@ -569,7 +681,7 @@ impl LoroService {
                 }
             }
         }
-        
+
         // Skip non-data lines (like event: lines)
         Ok(None)
     }
@@ -602,4 +714,58 @@ impl LoroService {
         self.direct_stats.reset();
         info!("Metrics reset successfully");
     }
+}
+
+// Retry helper function
+async fn execute_with_retry<F, T, E>(
+    mut operation: F,
+    max_retries: u32,
+    operation_name: &str,
+) -> Result<T>
+where
+    F: FnMut() -> futures::future::BoxFuture<'static, Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let mut attempt = 0;
+    let mut last_error = None;
+
+    while attempt <= max_retries {
+        attempt += 1;
+        match operation().await {
+            Ok(result) => {
+                if attempt > 1 {
+                    info!("{} succeeded after {} attempts", operation_name, attempt);
+                }
+                return Ok(result);
+            }
+            Err(e) => {
+                last_error = Some(e);
+                if attempt <= max_retries {
+                    let delay = Duration::from_millis((100 * attempt.pow(2)) as u64); // Exponential backoff
+                    warn!(
+                        "{} attempt {} failed, retrying in {:?}: {}",
+                        operation_name,
+                        attempt,
+                        delay,
+                        last_error.as_ref().unwrap()
+                    );
+                    tokio::time::sleep(delay).await;
+                } else {
+                    error!(
+                        "{} failed after {} attempts: {}",
+                        operation_name,
+                        max_retries,
+                        last_error.as_ref().unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "{} failed after {} retries: {}",
+        operation_name,
+        max_retries,
+        last_error.unwrap()
+    ))
 }
