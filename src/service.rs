@@ -1,4 +1,5 @@
 use crate::{config::Config, models::*, stats::StatsCollector};
+use secrecy::ExposeSecret;
 use anyhow::{Context, Result};
 use axum::response::{IntoResponse, Response, Sse};
 use futures::stream::{self, Stream, StreamExt};
@@ -321,10 +322,10 @@ impl LoroService {
             .json(&request_body);
 
         // Only add Authorization header if API key is not "none" (for local services like Ollama)
-        if self.config.small_model.api_key != "none" {
+        if self.config.small_model.api_key.expose_secret() != "none" {
             request_builder = request_builder.header(
                 "Authorization",
-                format!("Bearer {}", self.config.small_model.api_key),
+                format!("Bearer {}", self.config.small_model.api_key.expose_secret()),
             );
         }
 
@@ -416,18 +417,18 @@ impl LoroService {
         let mut enhanced_messages = Vec::with_capacity(request.messages.len() + 1);
         // Use module-level constants for common strings
 
-        enhanced_messages.push(HashMap::from([(
-            SYSTEM_ROLE.to_string(),
-            LARGE_SYSTEM_PROMPT.to_string(),
-        )]));
+        enhanced_messages.push(HashMap::from([
+            ("role".to_string(), SYSTEM_ROLE.to_string()),
+            ("content".to_string(), LARGE_SYSTEM_PROMPT.to_string()),
+        ]));
 
         // Pre-allocate capacity to avoid reallocations
-        enhanced_messages.reserve(request.messages.len() + 1);
+        enhanced_messages.reserve(request.messages.len());
 
         for msg in &request.messages {
             enhanced_messages.push(HashMap::from([
-                (SYSTEM_ROLE.to_string(), msg.role.clone()),
-                (USER_ROLE.to_string(), msg.content.clone()),
+                ("role".to_string(), msg.role.clone()),
+                ("content".to_string(), msg.content.clone()),
             ]));
         }
 
@@ -454,10 +455,10 @@ impl LoroService {
             .json(&request_body);
 
         // Only add Authorization header if API key is not "none" (for local services like Ollama)
-        if self.config.large_model.api_key != "none" {
+        if self.config.large_model.api_key.expose_secret() != "none" {
             request_builder = request_builder.header(
                 "Authorization",
-                format!("Bearer {}", self.config.large_model.api_key),
+                format!("Bearer {}", self.config.large_model.api_key.expose_secret()),
             );
         }
 
@@ -501,33 +502,56 @@ impl LoroService {
         let request_id = Uuid::new_v4().to_string();
         let model_name = request.model.clone();
 
-        // Process SSE stream - handle each chunk individually for now
-        // TODO: Implement proper buffering for incomplete SSE chunks
+        // Process SSE stream with proper buffering for incomplete chunks
+        let buffer = Arc::new(std::sync::Mutex::new(String::new()));
         let stream = byte_stream
             .map(move |chunk_result| {
                 let request_id = request_id.clone();
                 let model_name = model_name.clone();
+                let buffer = Arc::clone(&buffer);
 
                 match chunk_result {
                     Ok(bytes) => {
-                        let data = String::from_utf8_lossy(&bytes);
-                        let mut results = Vec::new();
+                        let mut buffer_guard = match buffer.lock() {
+                            Ok(guard) => guard,
+                            Err(e) => {
+                                error!("SSE buffer lock poisoned: {}", e);
+                                return futures::stream::iter(vec![Err(anyhow::anyhow!(
+                                    "SSE buffer lock poisoned"
+                                ))]);
+                            }
+                        };
 
-                        // Process each line in the received chunk
-                        for line in data.lines() {
+                        // Append new data to buffer
+                        buffer_guard.push_str(&String::from_utf8_lossy(&bytes));
+                        
+                        let mut results = Vec::new();
+                        let mut remaining_data = String::new();
+                        
+                        // Process complete lines from buffer
+                        for line in buffer_guard.lines() {
                             let line = line.trim();
                             if !line.is_empty() {
-                                match Self::process_sse_line_static(line, &request_id, &model_name)
-                                {
-                                    Ok(Some(chunk)) => results.push(Ok(chunk)),
-                                    Ok(None) => {} // Skip empty chunks
-                                    Err(e) => {
-                                        warn!("SSE parsing error: {}", e);
-                                        // Continue processing instead of failing the entire stream
+                                // Check if this looks like a complete SSE line
+                                if line.starts_with("data: ") || line == "[DONE]" {
+                                    match Self::process_sse_line_static(line, &request_id, &model_name) {
+                                        Ok(Some(chunk)) => results.push(Ok(chunk)),
+                                        Ok(None) => {} // Skip empty chunks
+                                        Err(e) => {
+                                            warn!("SSE parsing error: {}", e);
+                                            // Continue processing instead of failing the entire stream
+                                        }
                                     }
+                                } else {
+                                    // This might be an incomplete line, keep it for next chunk
+                                    remaining_data = line.to_string();
                                 }
                             }
                         }
+                        
+                        // Update buffer with remaining incomplete data
+                        *buffer_guard = remaining_data;
+                        
                         futures::stream::iter(results)
                     }
                     Err(e) => {

@@ -1,7 +1,6 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-#[allow(dead_code)]
 pub enum LoroError {
     #[error("Configuration error: {0}")]
     Config(#[from] anyhow::Error),
@@ -38,7 +37,6 @@ pub enum LoroError {
     Internal(String),
 }
 
-#[allow(dead_code)]
 impl LoroError {
     pub fn is_timeout(&self) -> bool {
         matches!(self, LoroError::Timeout { .. })
@@ -52,6 +50,3 @@ impl LoroError {
         matches!(self, LoroError::Validation(_))
     }
 }
-
-#[allow(dead_code)]
-pub type Result<T> = std::result::Result<T, LoroError>;

@@ -24,6 +24,7 @@ tower-http = { version = "0.5", features = ["cors", "trace", "compression-br", "
 hyper = "1.0"
 bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
+secrecy = { version = "0.8", features = ["serde"] }
 
 [profile.release]
 # 启用更激进的编译期优化

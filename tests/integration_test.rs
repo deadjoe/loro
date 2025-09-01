@@ -1,6 +1,7 @@
 use loro::{
     config::Config, errors::LoroError, models::*, service::LoroService, stats::StatsCollector,
 };
+use secrecy::Secret;
 
 #[tokio::test]
 async fn test_service_initialization() {
@@ -173,7 +174,7 @@ mod mock_tests {
 
         // Test validation with empty API key - create a config manually to test validation
         let mut config = result.unwrap();
-        config.small_model.api_key = "".to_string();
+        config.small_model.api_key = Secret::new("".to_string());
         assert!(config.validate().is_err(), "Should fail with empty API key");
     }
 
@@ -613,12 +614,12 @@ mod mock_tests {
             port: 8000,
             log_level: "info".to_string(),
             small_model: loro::config::ModelConfig {
-                api_key: "test-key".to_string(),
+                api_key: Secret::new("test-key".to_string()),
                 base_url: "https://api.example.com/v1".to_string(),
                 model_name: "test-model".to_string(),
             },
             large_model: loro::config::ModelConfig {
-                api_key: "test-key".to_string(),
+                api_key: Secret::new("test-key".to_string()),
                 base_url: "https://api.example.com/v1".to_string(),
                 model_name: "test-model".to_string(),
             },
