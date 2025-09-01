@@ -73,8 +73,8 @@ SMALL_MODEL_API_KEY=your-small-model-key
 LARGE_MODEL_API_KEY=your-large-model-key
 
 # Optional: Model Endpoints
-SMALL_MODEL_BASE_URL=https://api.siliconflow.cn/v1  # Default
-LARGE_MODEL_BASE_URL=https://api.siliconflow.cn/v1  # Default
+SMALL_MODEL_BASE_URL=https://api.siliconflow.cn/v1  # Default (use http://127.0.0.1:11434 for Ollama)
+LARGE_MODEL_BASE_URL=https://api.siliconflow.cn/v1  # Default (use http://127.0.0.1:11434 for Ollama)
 SMALL_MODEL_NAME=Qwen/Qwen2-1.5B-Instruct         # Default
 LARGE_MODEL_NAME=deepseek-ai/DeepSeek-V2.5         # Default
 
@@ -89,6 +89,10 @@ SMALL_MODEL_TIMEOUT_SECS=5     # Default: 5 (1-30)
 MAX_RETRIES=3                  # Default: 3 (0-10)
 STATS_MAX_ENTRIES=10000        # Default: 10000 (100-100000)
 ```
+
+Notes:
+- For local providers such as Ollama, you can set `*_BASE_URL=http://127.0.0.1:11434` and use `*_API_KEY=none`. In this case, the service will not send the Authorization header.
+- Streaming format differs by provider: OpenAI-compatible uses SSE (`/chat/completions`), Ollama uses JSONL over `/api/chat`. Loro normalizes both into OpenAI-style streaming chunks on the server side.
 
 ## 🛠️ API Reference
 
@@ -151,6 +155,12 @@ curl -X POST "http://localhost:8000/v1/chat/completions" \
 3. **Complete Response**: Large model processes full response in parallel
 4. **Stream Merging**: Quick response sent immediately, followed by large model output
 5. **Message Categorization**: Automatic detection of greetings, questions, requests
+
+### Provider Compatibility
+
+- **OpenAI-compatible**: When `*_BASE_URL` is a standard OpenAI-compatible endpoint, requests use `/chat/completions` with SSE streaming. Auth header `Bearer <API_KEY>` is sent if `*_API_KEY` is not `none`.
+- **Ollama (Local)**: When `*_BASE_URL` contains `11434`, requests use `/api/chat` with streaming JSON lines. Set `*_API_KEY=none`. Loro parses Ollama’s JSON line stream and converts it to OpenAI-style streaming chunks for clients.
+- Both small and large models support the above detection and paths independently, so you can mix providers (e.g., small=Ollama, large=OpenAI).
 
 ### Message Processing Flow
 
@@ -298,10 +308,10 @@ loro/
 To integrate additional AI model providers:
 
 1. **Configuration**: Add new environment variables in `config.rs`
-2. **Request Format**: Update `OpenAIRequest` structure if needed
-3. **Response Parsing**: Modify SSE parsing in `service.rs` 
-4. **Testing**: Add provider-specific tests
-5. **Documentation**: Update configuration section
+2. **Request Format**: Update request body builders and endpoints for the new provider (SSE vs JSONL)
+3. **Response Parsing**: Add a parsing branch in `service.rs` to normalize provider streams to OpenAI-style chunks
+4. **Testing**: Add provider-specific tests (unit + integration)
+5. **Documentation**: Update configuration and provider compatibility sections
 
 ## 🚀 Deployment
 
@@ -312,6 +322,16 @@ To integrate additional AI model providers:
 - **Monitoring**: Set up external monitoring for `/health` endpoint
 - **Security**: Configure proper firewall rules and TLS termination
 - **Scaling**: Consider load balancing for high-traffic scenarios
+- **CORS**: Restrict allowed origins instead of permissive wildcard. Example (code-level):
+  ```rust
+  use tower_http::cors::{Any, CorsLayer};
+  let cors = CorsLayer::new()
+      .allow_origin(["https://your.app".parse().unwrap()])
+      .allow_methods([http::Method::GET, http::Method::POST])
+      .allow_headers(Any);
+  // Router::new().layer(cors)
+  ```
+  In current sample we use `CorsLayer::permissive()` for development convenience; tighten it in production.
 
 
 ## 🤝 Contributing
