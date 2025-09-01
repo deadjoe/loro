@@ -85,10 +85,10 @@ impl Config {
         if self.large_model.api_key.trim().is_empty() {
             return Err(anyhow::anyhow!("LARGE_MODEL_API_KEY cannot be empty"));
         }
-        
+
         // For local services (like Ollama), API key can be "none"
         // No additional validation needed for API key content
-        
+
         // Note: "none" is accepted as a valid API key for local services like Ollama
 
         // Validate URLs
