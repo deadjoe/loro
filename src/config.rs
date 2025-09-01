@@ -124,6 +124,15 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        // Validate log level
+        let level = self.log_level.to_lowercase();
+        let allowed = ["trace", "debug", "info", "warn", "error"];
+        if !allowed.contains(&level.as_str()) {
+            return Err(anyhow::anyhow!(
+                "LOG_LEVEL must be one of trace|debug|info|warn|error"
+            ));
+        }
+
         // Validate API keys are not empty (allow "none" for local services like Ollama)
         if self.small_model.api_key.expose_secret().trim().is_empty() {
             return Err(anyhow::anyhow!("SMALL_MODEL_API_KEY cannot be empty"));

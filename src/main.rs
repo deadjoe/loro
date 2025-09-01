@@ -14,20 +14,19 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file if it exists
     dotenvy::dotenv().ok();
 
-    // Initialize tracing with performance optimizations
+    // Load configuration first to get unified log level
+    let config = Config::from_env()?;
+
+    // Initialize tracing using Config.log_level (unified entrypoint)
+    let level = config.log_level.to_lowercase();
+    let filter = tracing_subscriber::EnvFilter::new(format!("{},tower_http={}", level, level));
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "loro=debug,tower_http=debug".into()),
-        )
-        .with_target(false) // Reduce logging overhead in production
+        .with_env_filter(filter)
+        .with_target(false)
         .init();
 
     // Performance hint: Consider setting thread affinity in production
     // e.g., use taskset on Linux or thread affinity APIs
-
-    // Load configuration
-    let config = Config::from_env()?;
     info!(
         "Starting Loro AI Voice Assistant on {}:{}",
         config.host, config.port
@@ -55,4 +54,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
