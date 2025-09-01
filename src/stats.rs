@@ -182,21 +182,7 @@ pub fn calculate_stats(data: &[f64]) -> LatencyStats {
     }
 
     // Filter out NaN values and sort
-    let filtered_data: Vec<f64> = data.iter().filter(|&&x| x.is_finite()).copied().collect();
-    if filtered_data.is_empty() {
-        return LatencyStats {
-            avg: 0.0,
-            min: 0.0,
-            max: 0.0,
-            p50: 0.0,
-            p95: 0.0,
-        };
-    }
-
-    let mut sorted_data = filtered_data;
-    sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Double-check: sorted_data should not be empty after filtering
+    let mut sorted_data: Vec<f64> = data.iter().filter(|&&x| x.is_finite()).copied().collect();
     if sorted_data.is_empty() {
         return LatencyStats {
             avg: 0.0,
@@ -207,24 +193,20 @@ pub fn calculate_stats(data: &[f64]) -> LatencyStats {
         };
     }
 
+    sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
     let avg = sorted_data.iter().sum::<f64>() / sorted_data.len() as f64;
     let min = sorted_data[0];
     let max = sorted_data[sorted_data.len() - 1];
 
-    // Use proper percentile calculation (0-based indexing)
-    let p50_idx = if sorted_data.len() == 1 {
-        0
-    } else {
-        ((sorted_data.len() - 1) as f64 * 0.5) as usize
+    // Nearest-rank percentile (ceil) to match test expectations
+    let n = sorted_data.len();
+    let percentile_index = |p: f64| -> usize {
+        let rank = (p * n as f64).ceil() as usize;
+        rank.saturating_sub(1).min(n - 1)
     };
-    let p50 = sorted_data[p50_idx];
-
-    let p95_idx = if sorted_data.len() == 1 {
-        0
-    } else {
-        ((sorted_data.len() - 1) as f64 * 0.95) as usize
-    };
-    let p95 = sorted_data[p95_idx];
+    let p50 = sorted_data[percentile_index(0.5)];
+    let p95 = sorted_data[percentile_index(0.95)];
 
     LatencyStats {
         avg,

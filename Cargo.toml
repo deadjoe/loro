@@ -40,3 +40,5 @@ path = "src/main.rs"
 [dev-dependencies]
 tokio-stream = "0.1"
 tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
+serial_test = "2"

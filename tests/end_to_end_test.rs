@@ -7,6 +7,7 @@ use loro::{config::Config, models::*, service::LoroService};
 use serde_json::json;
 use std::sync::Arc;
 use tower::util::ServiceExt;
+use serial_test::serial;
 
 // Mock HTTP server for testing
 async fn create_test_app() -> Router {
@@ -64,6 +65,7 @@ async fn create_test_app() -> Router {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_root_endpoint() {
     let app = create_test_app().await;
 
@@ -87,6 +89,7 @@ async fn test_root_endpoint() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_health_endpoint() {
     let app = create_test_app().await;
 
@@ -111,6 +114,7 @@ async fn test_health_endpoint() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_metrics_endpoints() {
     let app = create_test_app().await;
 
@@ -160,6 +164,7 @@ async fn test_metrics_endpoints() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_request_validation_edge_cases() {
     // Test message categorization with various inputs
     let test_cases = vec![
@@ -194,6 +199,7 @@ async fn test_request_validation_edge_cases() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_performance_tracking() {
     use loro::stats::StatsCollector;
 
@@ -237,6 +243,7 @@ async fn test_performance_tracking() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_concurrent_stats_collection() {
     use loro::stats::StatsCollector;
     use std::sync::Arc;
@@ -275,6 +282,7 @@ async fn test_concurrent_stats_collection() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_memory_limit_enforcement() {
     use loro::stats::StatsCollector;
 
@@ -301,6 +309,7 @@ async fn test_memory_limit_enforcement() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_full_server_integration() {
     // Set up complete test environment
     std::env::set_var("SMALL_MODEL_API_KEY", "test-small-key");
@@ -410,6 +419,7 @@ async fn test_full_server_integration() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_stats_percentile_comprehensive() {
     use loro::stats::calculate_stats;
 
