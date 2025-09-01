@@ -29,7 +29,7 @@ impl LoroService {
             .connect_timeout(Duration::from_secs(2))
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(Duration::from_secs(30))
-            .no_proxy()  // Disable proxy for direct localhost connections
+            .no_proxy() // Disable proxy for direct localhost connections
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -109,16 +109,33 @@ impl LoroService {
             }],
         };
 
-        // Optimize string formatting for better performance
+        // Optimize string formatting for better performance with safety checks
         let json_str = serde_json::to_string(&first_chunk)?;
-        let mut first_chunk_data = String::with_capacity(json_str.len() + 8);
+        // Check for reasonable size limits to prevent memory issues
+        if json_str.len() > 1024 * 1024 {
+            // 1MB limit per chunk
+            return Err(anyhow::anyhow!(
+                "Response chunk too large: {} bytes",
+                json_str.len()
+            ));
+        }
+
+        let required_capacity = json_str.len().saturating_add(8); // "data: " + "\n\n"
+        let mut first_chunk_data = String::with_capacity(required_capacity);
         first_chunk_data.push_str("data: ");
         first_chunk_data.push_str(&json_str);
         first_chunk_data.push_str("\n\n");
 
+        // Verify final size is within reasonable bounds
+        if first_chunk_data.len() > 1024 * 1024 + 8 {
+            return Err(anyhow::anyhow!("Formatted chunk exceeds size limit"));
+        }
+
         // Step 2: Get large model stream with prefix
         let large_start = Instant::now();
-        let large_stream = self.get_large_model_stream(request, Some(quick_response)).await?;
+        let large_stream = self
+            .get_large_model_stream(request, Some(quick_response))
+            .await?;
 
         let stats = Arc::clone(&self.quick_stats);
         let enhanced_stream = large_stream.enumerate().map(move |(i, chunk_result)| {
@@ -204,12 +221,14 @@ impl LoroService {
         }
 
         // Fallback to predefined responses
-        let last_message = messages.last()
+        let last_message = messages
+            .last()
             .expect("Messages array should not be empty (already checked)");
         let category = last_message.categorize();
         let responses = category.get_responses();
         let mut rng = rand::thread_rng();
-        let response = responses.choose(&mut rng)
+        let response = responses
+            .choose(&mut rng)
             .expect("Predefined responses array should never be empty");
         Ok(response.to_string())
     }
@@ -219,7 +238,8 @@ impl LoroService {
             return Err(anyhow::anyhow!("Messages array cannot be empty"));
         }
 
-        let last_message = messages.last()
+        let last_message = messages
+            .last()
             .expect("Messages array should not be empty (already checked)");
         if last_message.content.trim().is_empty() {
             return Err(anyhow::anyhow!("Message content cannot be empty"));
@@ -245,9 +265,9 @@ impl LoroService {
                     "content": "/no_think 你是一个AI语音助手。请用1-3个字的简短语气词回应用户，比如：'你好！'、'好的，'、'嗯，'、'让我想想，'，要自然像真人对话。只输出语气词，不要完整回答。"
                 }),
                 json!({
-                    "role": "user", 
+                    "role": "user",
                     "content": last_message.content.clone()
-                })
+                }),
             ];
             json!({
                 "model": self.config.small_model.model_name,
@@ -284,8 +304,9 @@ impl LoroService {
         } else {
             format!("{}/chat/completions", self.config.small_model.base_url)
         };
-        
-        let mut request_builder = self.client
+
+        let mut request_builder = self
+            .client
             .post(endpoint)
             .header("Content-Type", "application/json")
             .json(&request_body);
@@ -325,7 +346,7 @@ impl LoroService {
                 .context("Failed to parse Ollama response")?;
             ollama_response.message.content
         } else {
-            // OpenAI response format  
+            // OpenAI response format
             let openai_response: OpenAIResponse = response
                 .json()
                 .await
@@ -431,7 +452,7 @@ impl LoroService {
                 Ok(bytes) => {
                     let data = String::from_utf8_lossy(&bytes);
                     let mut results = Vec::new();
-                    
+
                     // Process each line in the received chunk
                     for line in data.lines() {
                         let line = line.trim();
@@ -464,13 +485,21 @@ impl LoroService {
                             finish_reason: Some("stop".to_string()),
                         }],
                     };
-                    
+
                     if let Ok(json_str) = serde_json::to_string(&error_chunk) {
-                        let mut error_data = String::with_capacity(json_str.len() + 8);
-                        error_data.push_str("data: ");
-                        error_data.push_str(&json_str);
-                        error_data.push_str("\n\n");
-                        futures::stream::iter(vec![Ok(error_data)])
+                        // Check size limits for error chunks too
+                        if json_str.len() > 1024 * 1024 {
+                            futures::stream::iter(vec![Err(anyhow::anyhow!(
+                                "Error chunk too large"
+                            ))])
+                        } else {
+                            let required_capacity = json_str.len().saturating_add(8);
+                            let mut error_data = String::with_capacity(required_capacity);
+                            error_data.push_str("data: ");
+                            error_data.push_str(&json_str);
+                            error_data.push_str("\n\n");
+                            futures::stream::iter(vec![Ok(error_data)])
+                        }
                     } else {
                         futures::stream::iter(vec![Err(anyhow::anyhow!("Stream error: {}", e))])
                     }
@@ -504,9 +533,17 @@ impl LoroService {
                     if let Some(choice) = openai_chunk.choices.first() {
                         // Handle both message and delta fields for compatibility
                         let (content, role, finish_reason) = if let Some(delta) = &choice.delta {
-                            (delta.content.as_ref(), delta.role.as_ref(), choice.finish_reason.as_ref())
+                            (
+                                delta.content.as_ref(),
+                                delta.role.as_ref(),
+                                choice.finish_reason.as_ref(),
+                            )
                         } else if let Some(message) = &choice.message {
-                            (message.content.as_ref(), message.role.as_ref(), choice.finish_reason.as_ref())
+                            (
+                                message.content.as_ref(),
+                                message.role.as_ref(),
+                                choice.finish_reason.as_ref(),
+                            )
                         } else {
                             (None, None, choice.finish_reason.as_ref())
                         };
@@ -529,12 +566,16 @@ impl LoroService {
                                     }],
                                 };
 
-                                let chunk_data =
-                                    format!("data: {}\n\n", serde_json::to_string(&chunk)?);
+                                let json_str = serde_json::to_string(&chunk)?;
+                                // Check size limits for all chunks
+                                if json_str.len() > 1024 * 1024 {
+                                    return Ok(None); // Skip oversized chunks
+                                }
+                                let chunk_data = format!("data: {}\n\n", json_str);
                                 return Ok(Some(chunk_data));
                             }
                         }
-                        
+
                         // Handle finish_reason without content (end of stream)
                         if finish_reason.is_some() && content.is_none() {
                             let chunk = ChatCompletionChunk {
@@ -552,9 +593,14 @@ impl LoroService {
                                 }],
                             };
 
-                            // Optimize string formatting
+                            // Optimize string formatting with safety checks
                             let json_str = serde_json::to_string(&chunk)?;
-                            let mut chunk_data = String::with_capacity(json_str.len() + 8);
+                            // Check size limits for finish chunks too
+                            if json_str.len() > 1024 * 1024 {
+                                return Ok(None); // Skip oversized chunks
+                            }
+                            let required_capacity = json_str.len().saturating_add(8);
+                            let mut chunk_data = String::with_capacity(required_capacity);
                             chunk_data.push_str("data: ");
                             chunk_data.push_str(&json_str);
                             chunk_data.push_str("\n\n");
@@ -569,7 +615,7 @@ impl LoroService {
                 }
             }
         }
-        
+
         // Skip non-data lines (like event: lines)
         Ok(None)
     }

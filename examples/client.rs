@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
-        .no_proxy()  // Disable proxy in case there's interference
+        .no_proxy() // Disable proxy in case there's interference
         .build()?;
     let base_url = "http://127.0.0.1:8000";
 

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "loro=debug,tower_http=debug".into()),
         )
-        .with_target(false)  // Reduce logging overhead in production
+        .with_target(false) // Reduce logging overhead in production
         .init();
 
     // Performance hint: Consider setting thread affinity in production

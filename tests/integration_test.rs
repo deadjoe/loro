@@ -144,8 +144,13 @@ mod mock_tests {
 
         // Clear potentially interfering environment variables first
         let vars_to_clear = [
-            "HOST", "PORT", "LOG_LEVEL", "HTTP_TIMEOUT_SECS", 
-            "SMALL_MODEL_TIMEOUT_SECS", "MAX_RETRIES", "STATS_MAX_ENTRIES"
+            "HOST",
+            "PORT",
+            "LOG_LEVEL",
+            "HTTP_TIMEOUT_SECS",
+            "SMALL_MODEL_TIMEOUT_SECS",
+            "MAX_RETRIES",
+            "STATS_MAX_ENTRIES",
         ];
         for var in &vars_to_clear {
             std::env::remove_var(var);
@@ -160,7 +165,11 @@ mod mock_tests {
         std::env::set_var("STATS_MAX_ENTRIES", "1000");
 
         let result = Config::from_env();
-        assert!(result.is_ok(), "Should succeed with valid API keys: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Should succeed with valid API keys: {:?}",
+            result.err()
+        );
 
         // Test validation with empty API key - create a config manually to test validation
         let mut config = result.unwrap();
@@ -365,8 +374,13 @@ mod mock_tests {
     async fn test_concurrent_request_handling() {
         // Clear potentially interfering environment variables first
         let vars_to_clear = [
-            "HOST", "PORT", "LOG_LEVEL", "HTTP_TIMEOUT_SECS", 
-            "SMALL_MODEL_TIMEOUT_SECS", "MAX_RETRIES", "STATS_MAX_ENTRIES"
+            "HOST",
+            "PORT",
+            "LOG_LEVEL",
+            "HTTP_TIMEOUT_SECS",
+            "SMALL_MODEL_TIMEOUT_SECS",
+            "MAX_RETRIES",
+            "STATS_MAX_ENTRIES",
         ];
         for var in &vars_to_clear {
             std::env::remove_var(var);
@@ -528,7 +542,7 @@ mod mock_tests {
         // Test that prefix is correctly included in OpenAI request
         use loro::models::OpenAIRequest;
         use serde_json::json;
-        
+
         let request = OpenAIRequest {
             model: "test".to_string(),
             messages: vec![],
@@ -541,22 +555,22 @@ mod mock_tests {
             stream: true,
             extra_body: Some(json!({"prefix": "你好！"})),
         };
-        
+
         // Verify prefix is in extra_body
         assert!(request.extra_body.is_some());
         let extra_body = request.extra_body.as_ref().unwrap();
         assert_eq!(extra_body["prefix"], "你好！");
-        
+
         // Test serialization
         let serialized = serde_json::to_string(&request).unwrap();
         assert!(serialized.contains("prefix"));
         assert!(serialized.contains("你好！"));
     }
-    
+
     #[tokio::test]
     async fn test_sse_parsing_edge_cases() {
         use loro::service::LoroService;
-        
+
         // Test various SSE line formats
         let test_cases = vec![
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}",
@@ -567,22 +581,22 @@ mod mock_tests {
             "event: error",
             "data: {\"malformed json",
         ];
-        
+
         for (i, line) in test_cases.iter().enumerate() {
             // This tests that SSE parsing doesn't panic on various inputs
-            let result = LoroService::process_sse_line_static(
-                line, 
-                "test-id", 
-                "test-model"
-            );
-            
+            let result = LoroService::process_sse_line_static(line, "test-id", "test-model");
+
             // Should not panic, may return Ok(None) or Ok(Some(...))
             match result {
-                Ok(_) => {}, // Expected
+                Ok(_) => {} // Expected
                 Err(e) => {
                     // Only structural errors should cause failures
-                    assert!(!e.to_string().contains("panic"), 
-                           "Case {}: Should not panic on: {}", i, line);
+                    assert!(
+                        !e.to_string().contains("panic"),
+                        "Case {}: Should not panic on: {}",
+                        i,
+                        line
+                    );
                 }
             }
         }
@@ -621,6 +635,9 @@ mod mock_tests {
         assert!(config.validate().is_err(), "Should fail with low timeout");
 
         config.http_timeout_secs = 30; // Valid
-        assert!(config.validate().is_ok(), "Should succeed with valid timeout");
+        assert!(
+            config.validate().is_ok(),
+            "Should succeed with valid timeout"
+        );
     }
 }
